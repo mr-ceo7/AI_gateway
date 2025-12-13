@@ -34,7 +34,7 @@ def generate():
             try:
                 # Use stdbuf or similar if buffering issues arise, but gemini likely streams
                 process = subprocess.Popen(
-                    ['gemini', 'chat'],
+                    ['gemini'],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -78,7 +78,7 @@ def generate():
                 prompt += '\n'
             # call gemini cli with the prompt via stdin (Buffered)
             result = subprocess.run(
-                ['gemini', 'chat'],
+                ['gemini'],
                 input=prompt,
                 capture_output=True,
                 text=True,
