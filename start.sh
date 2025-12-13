@@ -24,10 +24,10 @@ fi
 # Run a test command to check connectivity
 echo "Checking Gemini CLI..."
 # We use explicit 'chat' command with argument to avoid ambiguity
-gemini chat "Hello World" || echo "WARNING: Gemini CLI check failed (Auth/Quota issue). Starting server anyway..."
+gemini chat "Hello World" || echo "WARNING: Gemini CLI check failed. Continuing start-up to enable Auth UI..."
 
 echo "----------------------------------------------------------------"
-echo "Starting Web Server..."
+echo "Starting Web Server with Auth UI..."
 echo "----------------------------------------------------------------"
 
 
