@@ -13,17 +13,22 @@ echo "Please check the logs below for an authentication URL."
 echo "Copy and paste it into your browser to authorize."
 echo "----------------------------------------------------------------"
 
-# Run a test command to trigger authentication.
-# We use '|| true' to ensure the script continues even if gemini returns a non-zero exit code
-# (which it might if auth is pending or fails initially).
-# IMPORTANT: This output will appear in Render logs. Watch for the URL!
-echo "Triggering Gemini CLI..."
-# echo "Hello World" | gemini chat || true
-gemini
+# Check for API Key
+if [ -z "$GEMINI_API_KEY" ]; then
+    echo "WARNING: GEMINI_API_KEY not found!"
+    echo "For Render deployment, please set the GEMINI_API_KEY environment variable."
+    echo "Get one here: https://aistudio.google.com/app/apikey"
+    # We attempt to run anyway, in case there's another auth method (e.g. volume mount)
+fi
+
+# Run a test command to check connectivity
+echo "Checking Gemini CLI..."
+echo "Hello World" | gemini chat || echo "Gemini CLI check failed (expected if no auth)"
 
 echo "----------------------------------------------------------------"
 echo "Starting Web Server..."
 echo "----------------------------------------------------------------"
+
 
 # Start the server
 exec gunicorn --bind 0.0.0.0:$PORT app:app
