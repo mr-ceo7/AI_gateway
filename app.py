@@ -43,6 +43,9 @@ def generate():
                 )
                 
                 # Write input and close stdin to signal end of input
+                # Ensure newline is present to trigger processing
+                if not prompt.endswith('\n'):
+                    prompt += '\n'
                 process.stdin.write(prompt)
                 process.stdin.close()
 
@@ -71,6 +74,8 @@ def generate():
 
     else:
         try:
+            if not prompt.endswith('\n'):
+                prompt += '\n'
             # call gemini cli with the prompt via stdin (Buffered)
             result = subprocess.run(
                 ['gemini', 'chat'],
