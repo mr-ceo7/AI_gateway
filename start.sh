@@ -18,7 +18,8 @@ echo "----------------------------------------------------------------"
 # (which it might if auth is pending or fails initially).
 # IMPORTANT: This output will appear in Render logs. Watch for the URL!
 echo "Triggering Gemini CLI..."
-echo "Hello World" | gemini chat || true
+# echo "Hello World" | gemini chat || true
+gemini
 
 echo "----------------------------------------------------------------"
 echo "Starting Web Server..."
