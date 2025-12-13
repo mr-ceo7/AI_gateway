@@ -566,11 +566,23 @@
 
     <script>
         // --- Splash Screen ---
+        // Global error handler to ensure we never get stuck
+        window.onerror = function (msg, url, line) {
+            console.error("Global JS Error:", msg);
+            // If an error happens early, hide splash screen so user isn't stuck
+            setTimeout(() => {
+                const splash = document.getElementById('splash-screen');
+                if (splash && !splash.classList.contains('hidden')) {
+                    splash.classList.add('hidden');
+                }
+            }, 1000);
+        };
         // Moved the hiding logic to after checkAuthStatus() 
         // to prevent it from getting stuck if auth check fails/delays
         function hideSplashScreen() {
             setTimeout(() => {
-                document.getElementById('splash-screen').classList.add('hidden');
+                const splash = document.getElementById('splash-screen');
+                if (splash) splash.classList.add('hidden');
             }, 500);
         }
 
@@ -972,22 +984,22 @@
 
 
         // Initial Load
-        document.addEventListener('DOMContentLoaded', async () => {
+        // Initial Load
+        document.addEventListener('DOMContentLoaded', () => {
              renderHistoryList();
              
              // Failsafe: Force hide splash screen after 5 seconds max
-             setTimeout(() => {
+             const safetyTimer = setTimeout(() => {
                  console.warn("Splash screen timed out, forcing hide.");
                  hideSplashScreen();
              }, 5000);
 
-             try {
-                 await checkAuthStatus();
-             } catch (e) {
+             checkAuthStatus().catch(e => {
                  console.error("Auth check failed during load:", e);
-             } finally {
-                 hideSplashScreen(); // Hide splash screen only after we know auth status (or it failed)
-             }
+             }).finally(() => {
+                 clearTimeout(safetyTimer); // Clear safety timer if normal flow works
+                 hideSplashScreen();
+             });
         });
 
     </script>
