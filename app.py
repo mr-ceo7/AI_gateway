@@ -39,10 +39,9 @@ def generate():
     if stream:
         def generate_output():
             try:
-                # Pass prompt as argument to avoid stdin buffering issues
-                # This is proven to work locally (step 474) whereas stdin hangs
+                # Use ['gemini', 'chat', prompt] which is the robust way to send a message
                 process = subprocess.Popen(
-                    ['gemini', prompt],
+                    ['gemini', 'chat', prompt],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, # Merge stderr
                     text=True,
@@ -50,7 +49,7 @@ def generate():
                     env=env
                 )
                 
-                print(f"Started process with prompt arg (len={len(prompt)}). Reading stdout...", flush=True)
+                print(f"Started gemini chat with prompt arg (len={len(prompt)}). Reading stdout...", flush=True)
 
                 while True:
                     # Read larger chunks to avoid overhead, but small enough for streaming
@@ -72,9 +71,9 @@ def generate():
 
     else:
         try:
-            print("Running subprocess.run (args)...", flush=True)
+            print("Running subprocess.run (gemini chat prompt)...", flush=True)
             result = subprocess.run(
-                ['gemini', prompt],
+                ['gemini', 'chat', prompt],
                 capture_output=True,
                 text=True,
                 check=False,
