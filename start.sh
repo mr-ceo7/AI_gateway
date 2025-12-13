@@ -23,7 +23,7 @@ fi
 
 # Run a test command to check connectivity
 echo "Checking Gemini CLI..."
-echo "Hello World" | gemini chat || echo "Gemini CLI check failed (expected if no auth)"
+echo "Hello World" | gemini || echo "Gemini CLI check failed (expected if no auth)"
 
 echo "----------------------------------------------------------------"
 echo "Starting Web Server..."

@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, render_template
 import subprocess
+import os
 
 app = Flask(__name__)
 
@@ -27,8 +28,13 @@ def generate():
     else:
         return jsonify({'error': 'Missing prompt or messages'}), 400
 
-    stream = data.get('stream', False)
+    # Add debug logging
+    print(f"Generating with prompt length: {len(prompt)}", flush=True)
     
+    # Set up environment with TERM
+    env = os.environ.copy()
+    env['TERM'] = 'xterm-256color'
+
     if stream:
         def generate_output():
             try:
@@ -39,15 +45,22 @@ def generate():
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
-                    bufsize=0 # Unbuffered
+                    bufsize=0, # Unbuffered
+                    env=env
                 )
                 
                 # Write input and close stdin to signal end of input
                 # Ensure newline is present to trigger processing
                 if not prompt.endswith('\n'):
-                    prompt += '\n'
-                process.stdin.write(prompt)
+                    prompt_with_newline = prompt + '\n'
+                else:
+                    prompt_with_newline = prompt
+                
+                print("Writing to stdin...", flush=True)
+                process.stdin.write(prompt_with_newline)
+                process.stdin.flush()
                 process.stdin.close()
+                print("Stdin closed. Reading stdout...", flush=True)
 
                 # Read stdout char by char or line by line
                 # For proper token streaming, char by char (or small chunk) is best
@@ -62,12 +75,12 @@ def generate():
                 # Check for errors after
                 stderr = process.stderr.read()
                 if process.returncode != 0:
-                     # In a stream, we might have already sent 200 OK. 
-                     # Ideally we'd send an error event, but for simple text stream:
+                     print(f"Process failed with code {process.returncode}: {stderr}", flush=True)
                      if stderr:
                         yield f"\n[Error: {stderr}]"
 
             except Exception as e:
+                print(f"Exception during generation: {e}", flush=True)
                 yield f"\n[Exception: {str(e)}]"
 
         return app.response_class(generate_output(), mimetype='text/plain')
@@ -76,16 +89,21 @@ def generate():
         try:
             if not prompt.endswith('\n'):
                 prompt += '\n'
+            
+            print("Running subprocess.run...", flush=True)
             # call gemini cli with the prompt via stdin (Buffered)
             result = subprocess.run(
                 ['gemini'],
                 input=prompt,
                 capture_output=True,
                 text=True,
-                check=False 
+                check=False,
+                env=env
             )
             
+            print(f"Subprocess finished. Code: {result.returncode}", flush=True)
             if result.returncode != 0:
+                 print(f"Error output: {result.stderr}", flush=True)
                  return jsonify({
                      'error': 'Gemini CLI failed',
                      'stderr': result.stderr
@@ -95,6 +113,7 @@ def generate():
             return jsonify({'response': result.stdout.strip()})
     
         except Exception as e:
+            print(f"Exception: {e}", flush=True)
             return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
