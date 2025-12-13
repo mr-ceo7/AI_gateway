@@ -566,11 +566,13 @@
 
     <script>
         // --- Splash Screen ---
-        window.addEventListener('load', () => {
+        // Moved the hiding logic to after checkAuthStatus() 
+        // to prevent it from getting stuck if auth check fails/delays
+        function hideSplashScreen() {
             setTimeout(() => {
                 document.getElementById('splash-screen').classList.add('hidden');
-            }, 2000); // 2 seconds delay
-        });
+            }, 500);
+        }
 
         // --- Dynamic Theme Engine ---
         function generateTheme() {
@@ -831,7 +833,7 @@
         }
 
        <!-- Auth Modal -->
-    <div id="auth-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; justify-content: center; align-items: center;">
+    <div id="auth-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 2000; justify-content: center; align-items: center;">
         <div style="background: var(--bg-secondary); padding: 2rem; border-radius: 12px; width: 90%; max-width: 500px; text-align: center; border: 1px solid var(--border-color); box-shadow: 0 4px 20px rgba(0,0,0,0.5);">
             <h2 style="margin-top: 0; margin-bottom: 1rem; color: var(--text-primary);">Authentication Required</h2>
             <p style="color: var(--text-secondary); margin-bottom: 1.5rem;">The server needs to authenticate with Google. Please follow these steps:</p>
@@ -970,7 +972,11 @@
 
 
         // Initial Load
-        renderHistoryList();
+        document.addEventListener('DOMContentLoaded', async () => {
+             renderHistoryList();
+             await checkAuthStatus();
+             hideSplashScreen(); // Hide splash screen only after we know auth status
+        });
 
     </script>
 </body>
