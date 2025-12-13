@@ -39,10 +39,9 @@ def generate():
     if stream:
         def generate_output():
             try:
-                # Use stdbuf or similar if buffering issues arise, but gemini likely streams
+                # Pass prompt as argument to avoid stdin buffering issues
                 process = subprocess.Popen(
-                    ['gemini'],
-                    stdin=subprocess.PIPE,
+                    ['gemini', prompt],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -50,18 +49,8 @@ def generate():
                     env=env
                 )
                 
-                # Write input and close stdin to signal end of input
-                # Ensure newline is present to trigger processing
-                if not prompt.endswith('\n'):
-                    prompt_with_newline = prompt + '\n'
-                else:
-                    prompt_with_newline = prompt
-                
-                print("Writing to stdin...", flush=True)
-                process.stdin.write(prompt_with_newline)
-                process.stdin.flush()
-                process.stdin.close()
-                print("Stdin closed. Reading stdout...", flush=True)
+                # We don't use stdin anymore
+                print("Started process with prompt arg. Reading stdout...", flush=True)
 
                 # Read stdout char by char or line by line
                 # For proper token streaming, char by char (or small chunk) is best
@@ -88,14 +77,10 @@ def generate():
 
     else:
         try:
-            if not prompt.endswith('\n'):
-                prompt += '\n'
-            
-            print("Running subprocess.run...", flush=True)
-            # call gemini cli with the prompt via stdin (Buffered)
+            print("Running subprocess.run with prompt arg...", flush=True)
+            # call gemini cli with the prompt as argument
             result = subprocess.run(
-                ['gemini'],
-                input=prompt,
+                ['gemini', prompt],
                 capture_output=True,
                 text=True,
                 check=False,
