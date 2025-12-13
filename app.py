@@ -47,10 +47,10 @@ class GeminiAuthenticator:
             # Create a pseudo-terminal
             master_fd, slave_fd = pty.openpty()
             
-            # Start 'gemini "hello"' to force implicit auth check
+            # Start 'gemini' (interactive REPL) to trigger auth flow
             # We connect stdout/stdin to the PTY
             self.auth_process = subprocess.Popen(
-                ['gemini', 'hello'],
+                ['gemini'],
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd, # Merge all output to PTY
@@ -75,6 +75,8 @@ class GeminiAuthenticator:
         print("Auth Monitor: Started reading PTY output...", flush=True)
         # Regex to catch the URL
         url_pattern = re.compile(r'(https://[^\s]+)')
+        # Regex to strip ANSI codes
+        ansi_include_pattern = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         
         while True:
             try:
@@ -88,8 +90,11 @@ class GeminiAuthenticator:
                 for line in output.splitlines():
                     print(f"Auth Output: {line}", flush=True)
                     
+                    # Strip ANSI
+                    clean_line = ansi_include_pattern.sub('', line)
+                    
                     # Check for URL
-                    match = url_pattern.search(line)
+                    match = url_pattern.search(clean_line)
                     if match:
                         found_url = match.group(1)
                         # Filter out internal links if needed, but capturing 'https://...' is good start
