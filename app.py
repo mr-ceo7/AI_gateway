@@ -4,6 +4,7 @@ import os
 import threading
 import time
 import re
+import pty
 
 app = Flask(__name__)
 
@@ -32,6 +33,7 @@ class GeminiAuthenticator:
             self.is_authenticated = False
             return False
 
+
     def start_auth_flow(self):
         """Starts the interactive auth process and scrapes the URL."""
         with self.auth_lock:
@@ -39,82 +41,109 @@ class GeminiAuthenticator:
                 return # Already running
 
             env = os.environ.copy()
-            env['TERM'] = 'dumb'
+            env['TERM'] = 'xterm-256color' # Pretend to be a real terminal
             env['NO_BROWSER'] = 'true'
             
-            env = os.environ.copy()
-            env['TERM'] = 'dumb'
-            env['NO_BROWSER'] = 'true'
+            # Create a pseudo-terminal
+            master_fd, slave_fd = pty.openpty()
             
             # Start 'gemini "hello"' to force implicit auth check
-            # We merge stderr into stdout to catch the URL
+            # We connect stdout/stdin to the PTY
             self.auth_process = subprocess.Popen(
                 ['gemini', 'hello'],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stdin=slave_fd,
+                stdout=slave_fd,
+                stderr=slave_fd, # Merge all output to PTY
                 text=True,
-                bufsize=0, # Unbuffered
-                env=env
+                bufsize=0,
+                env=env,
+                close_fds=True
             )
             
-            # Start a background thread to read output and find the URL
+            # Close slave_fd in parent (the child has it now)
+            os.close(slave_fd)
+            self.master_fd = master_fd # Save master for reading/writing
+            
+            # Start a background thread to read output from the PTY
             threading.Thread(target=self._monitor_output, daemon=True).start()
 
     def _monitor_output(self):
-        """Reads stdout looking for the auth URL."""
-        if not self.auth_process:
+        """Reads PTY output looking for the auth URL."""
+        if not self.auth_process or not hasattr(self, 'master_fd') or self.master_fd is None:
             return
 
-        print("Auth Monitor: Started reading output...", flush=True)
-        # Relaxed regex to catch any https link, as CLI output might vary
+        print("Auth Monitor: Started reading PTY output...", flush=True)
+        # Regex to catch the URL
         url_pattern = re.compile(r'(https://[^\s]+)')
         
         while True:
-            line = self.auth_process.stdout.readline()
-            if not line:
+            try:
+                # Read from PTY
+                output = os.read(self.master_fd, 1024).decode('utf-8', errors='ignore')
+                if not output:
+                    # PTY closed or no more output
+                    break
+                
+                # Print raw for debugging
+                for line in output.splitlines():
+                    print(f"Auth Output: {line}", flush=True)
+                    
+                    # Check for URL
+                    match = url_pattern.search(line)
+                    if match:
+                        found_url = match.group(1)
+                        # Filter out internal links if needed, but capturing 'https://...' is good start
+                        if "google.com" in found_url or "accounts" in found_url:
+                             self.auth_url = found_url
+                             print(f"Auth Monitor: Found URL: {self.auth_url}", flush=True)
+
+            except OSError:
+                # This happens when the PTY is closed by the child process exiting
                 break
-            
-            print(f"Auth Output: {line.strip()}", flush=True)
-            
-            # Check for URL
-            match = url_pattern.search(line)
-            if match:
-                self.auth_url = match.group(1)
-                print(f"Auth Monitor: Found URL: {self.auth_url}", flush=True)
-                # We can stop reading aggressively, but we need to keep reading 
-                # so the buffer doesn't fill up?
-                # Actually, after URL, it waits for input.
-            
-            # If we successfully caught the URL, we can stop scanning aggressively
-            if self.auth_url and "Enter the authorization code" in line:
-                pass # Ready for input
+            except Exception as e:
+                print(f"Auth Monitor: Error reading PTY output: {e}", flush=True)
+                break
+        print("Auth Monitor: PTY output monitoring finished.", flush=True)
+
 
     def submit_code(self, code):
-        """Writes the auth code to the process stdin."""
+        """Writes the auth code to the PTY."""
         with self.auth_lock:
             if not self.auth_process or self.auth_process.poll() is not None:
                 return False, "Auth process not running."
+            if self.master_fd is None:
+                return False, "PTY master not open."
             
             try:
                 print(f"Auth Monitor: Submitting code (len={len(code)})...", flush=True)
                 if not code.endswith('\n'):
                     code += '\n'
                 
-                self.auth_process.stdin.write(code)
-                self.auth_process.stdin.flush()
-                self.auth_process.stdin.close() # Usually closing stdin triggers processing
+                # Write code to the PTY master (which sends it to subprocess stdin)
+                os.write(self.master_fd, code.encode('utf-8'))
+                
+                # After submitting the code, we expect the process to finish or continue
+                # We can't immediately check returncode here as it might still be processing.
+                # The _monitor_output thread will continue to read.
+                # For now, we assume submission is successful and let the monitor thread
+                # or a subsequent check_auth_status determine final success.
                 
                 # Wait a bit for it to finish and exit
+                # This is a blocking wait, which might not be ideal for a web request.
+                # A better approach would be to poll or have the monitor thread signal completion.
+                # For now, we'll keep a short wait.
                 self.auth_process.wait(timeout=10)
                 
                 if self.auth_process.returncode == 0:
                     self.is_authenticated = True
                     self.auth_url = None
+                    # Close the master PTY when done
+                    if self.master_fd:
+                        os.close(self.master_fd)
+                        self.master_fd = None
                     self.auth_process = None
                     return True, "Authentication successful."
                 else:
-                    return False, "Authentication failed (process exited with error)."
             except Exception as e:
                 print(f"Auth Monitor: Exception submitting code: {e}", flush=True)
                 return False, f"Error submitting code: {str(e)}"
