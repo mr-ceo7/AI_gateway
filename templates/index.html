@@ -843,13 +843,17 @@
                 sendMessage();
             }
         }
+    </script>
 
-       <!-- Auth Modal -->
-    <div id="auth-modal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 2000; justify-content: center; align-items: center;">
-        <div style="background: var(--bg-secondary); padding: 2rem; border-radius: 12px; width: 90%; max-width: 500px; text-align: center; border: 1px solid var(--border-color); box-shadow: 0 4px 20px rgba(0,0,0,0.5);">
+    <!-- Auth Modal -->
+    <div id="auth-modal"
+        style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 2000; justify-content: center; align-items: center;">
+        <div
+            style="background: var(--bg-secondary); padding: 2rem; border-radius: 12px; width: 90%; max-width: 500px; text-align: center; border: 1px solid var(--border-color); box-shadow: 0 4px 20px rgba(0,0,0,0.5);">
             <h2 style="margin-top: 0; margin-bottom: 1rem; color: var(--text-primary);">Authentication Required</h2>
-            <p style="color: var(--text-secondary); margin-bottom: 1.5rem;">The server needs to authenticate with Google. Please follow these steps:</p>
-            
+            <p style="color: var(--text-secondary); margin-bottom: 1.5rem;">The server needs to authenticate with
+                Google. Please follow these steps:</p>
+
             <div id="auth-loading" style="display: block;">
                 <p>Generating Auth URL...</p>
                 <div class="spinner"></div> <!-- Reuse existing spinner logic or add css -->
@@ -857,12 +861,17 @@
 
             <div id="auth-content" style="display: none;">
                 <p style="margin-bottom: 0.5rem;">1. Click this link to authorize:</p>
-                <a id="auth-link" href="#" target="_blank" style="display: block; background: var(--accent-primary); color: white; padding: 10px; border-radius: 6px; text-decoration: none; margin-bottom: 1.5rem; word-break: break-all;">Open Google Auth</a>
-                
+                <a id="auth-link" href="#" target="_blank"
+                    style="display: block; background: var(--accent-primary); color: white; padding: 10px; border-radius: 6px; text-decoration: none; margin-bottom: 1.5rem; word-break: break-all;">Open
+                    Google Auth</a>
+
                 <p style="margin-bottom: 0.5rem;">2. Copy the code and paste it here:</p>
-                <input type="text" id="auth-code-input" placeholder="Paste verification code here" style="width: 100%; padding: 10px; background: var(--bg-primary); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; margin-bottom: 1rem; font-family: monospace;">
-                
-                <button id="auth-submit-btn" onclick="submitAuthCode()" style="background: var(--accent-primary); color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; width: 100%; font-weight: 500;">Complete Authentication</button>
+                <input type="text" id="auth-code-input" placeholder="Paste verification code here"
+                    style="width: 100%; padding: 10px; background: var(--bg-primary); border: 1px solid var(--border-color); color: var(--text-primary); border-radius: 6px; margin-bottom: 1rem; font-family: monospace;">
+
+                <button id="auth-submit-btn" onclick="submitAuthCode()"
+                    style="background: var(--accent-primary); color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; width: 100%; font-weight: 500;">Complete
+                    Authentication</button>
                 <p id="auth-error" style="color: #ef4444; margin-top: 1rem; display: none;"></p>
             </div>
         </div>
@@ -878,7 +887,7 @@
             try {
                 const res = await fetch('/api/auth/status');
                 const data = await res.json();
-                
+
                 if (!data.authenticated) {
                     showAuthModal();
                     pollForAuthUrl();
@@ -898,13 +907,13 @@
             const loadingDiv = document.getElementById('auth-loading');
             const contentDiv = document.getElementById('auth-content');
             const link = document.getElementById('auth-link');
-            
+
             // Poll every 2 seconds for URL
             const interval = setInterval(async () => {
                 try {
                     const res = await fetch('/api/auth/url');
                     const data = await res.json();
-                    
+
                     if (data.url) {
                         clearInterval(interval);
                         link.href = data.url;
@@ -921,7 +930,7 @@
             const codeInput = document.getElementById('auth-code-input');
             const btn = document.getElementById('auth-submit-btn');
             const errorMsg = document.getElementById('auth-error');
-            
+
             const code = codeInput.value.trim();
             if (!code) return;
 
@@ -936,7 +945,7 @@
                     body: JSON.stringify({ code })
                 });
                 const data = await res.json();
-                
+
                 if (data.success) {
                     location.reload(); // Reload to start chatting
                 } else {
@@ -986,20 +995,20 @@
         // Initial Load
         // Initial Load
         document.addEventListener('DOMContentLoaded', () => {
-             renderHistoryList();
-             
-             // Failsafe: Force hide splash screen after 5 seconds max
-             const safetyTimer = setTimeout(() => {
-                 console.warn("Splash screen timed out, forcing hide.");
-                 hideSplashScreen();
-             }, 5000);
+            renderHistoryList();
 
-             checkAuthStatus().catch(e => {
-                 console.error("Auth check failed during load:", e);
-             }).finally(() => {
-                 clearTimeout(safetyTimer); // Clear safety timer if normal flow works
-                 hideSplashScreen();
-             });
+            // Failsafe: Force hide splash screen after 5 seconds max
+            const safetyTimer = setTimeout(() => {
+                console.warn("Splash screen timed out, forcing hide.");
+                hideSplashScreen();
+            }, 5000);
+
+            checkAuthStatus().catch(e => {
+                console.error("Auth check failed during load:", e);
+            }).finally(() => {
+                clearTimeout(safetyTimer); // Clear safety timer if normal flow works
+                hideSplashScreen();
+            });
         });
 
     </script>
