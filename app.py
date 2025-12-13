@@ -144,6 +144,7 @@ class GeminiAuthenticator:
                     self.auth_process = None
                     return True, "Authentication successful."
                 else:
+                    return False, "Authentication failed (process exited with error)."
             except Exception as e:
                 print(f"Auth Monitor: Exception submitting code: {e}", flush=True)
                 return False, f"Error submitting code: {str(e)}"
