@@ -39,10 +39,10 @@ def generate():
     if stream:
         def generate_output():
             try:
-                # Use ['gemini'] processing stdin, merging stderr to avoid deadlock
+                # Pass prompt as argument to avoid stdin buffering issues
+                # This is proven to work locally (step 474) whereas stdin hangs
                 process = subprocess.Popen(
-                    ['gemini'],
-                    stdin=subprocess.PIPE,
+                    ['gemini', prompt],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, # Merge stderr
                     text=True,
@@ -50,17 +50,7 @@ def generate():
                     env=env
                 )
                 
-                print("Writing to stdin...", flush=True)
-                # Ensure newline
-                if not prompt.endswith('\n'):
-                    prompt_in = prompt + '\n'
-                else:
-                    prompt_in = prompt
-                    
-                process.stdin.write(prompt_in)
-                process.stdin.flush()
-                process.stdin.close()
-                print("Stdin closed. Reading stdout (merged with stderr)...", flush=True)
+                print(f"Started process with prompt arg (len={len(prompt)}). Reading stdout...", flush=True)
 
                 while True:
                     # Read larger chunks to avoid overhead, but small enough for streaming
@@ -82,10 +72,9 @@ def generate():
 
     else:
         try:
-            print("Running subprocess.run (stdin)...", flush=True)
+            print("Running subprocess.run (args)...", flush=True)
             result = subprocess.run(
-                ['gemini'],
-                input=prompt,
+                ['gemini', prompt],
                 capture_output=True,
                 text=True,
                 check=False,
