@@ -32,42 +32,47 @@ def generate():
     # Add debug logging
     print(f"Generating with prompt length: {len(prompt)}", flush=True)
     
-    # Set up environment with TERM
+    # Set up environment - mimic simple shell
     env = os.environ.copy()
-    env['TERM'] = 'xterm-256color'
+    env['TERM'] = 'dumb' # Force non-interactive
 
     if stream:
         def generate_output():
             try:
-                # Pass prompt as argument to avoid stdin buffering issues
+                # Use ['gemini'] processing stdin, merging stderr to avoid deadlock
                 process = subprocess.Popen(
-                    ['gemini', prompt],
+                    ['gemini'],
+                    stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, # Merge stderr
                     text=True,
                     bufsize=0, # Unbuffered
                     env=env
                 )
                 
-                # We don't use stdin anymore
-                print("Started process with prompt arg. Reading stdout...", flush=True)
+                print("Writing to stdin...", flush=True)
+                # Ensure newline
+                if not prompt.endswith('\n'):
+                    prompt_in = prompt + '\n'
+                else:
+                    prompt_in = prompt
+                    
+                process.stdin.write(prompt_in)
+                process.stdin.flush()
+                process.stdin.close()
+                print("Stdin closed. Reading stdout (merged with stderr)...", flush=True)
 
-                # Read stdout char by char or line by line
-                # For proper token streaming, char by char (or small chunk) is best
                 while True:
-                    # Read a chunk
-                    chunk = process.stdout.read(1) 
+                    # Read larger chunks to avoid overhead, but small enough for streaming
+                    # Note: read(1) is fine for text=True unbuffered
+                    chunk = process.stdout.read(1)
                     if not chunk and process.poll() is not None:
                         break
                     if chunk:
                         yield chunk
                 
-                # Check for errors after
-                stderr = process.stderr.read()
                 if process.returncode != 0:
-                     print(f"Process failed with code {process.returncode}: {stderr}", flush=True)
-                     if stderr:
-                        yield f"\n[Error: {stderr}]"
+                     print(f"Process exited with code {process.returncode}", flush=True)
 
             except Exception as e:
                 print(f"Exception during generation: {e}", flush=True)
@@ -77,10 +82,10 @@ def generate():
 
     else:
         try:
-            print("Running subprocess.run with prompt arg...", flush=True)
-            # call gemini cli with the prompt as argument
+            print("Running subprocess.run (stdin)...", flush=True)
             result = subprocess.run(
-                ['gemini', prompt],
+                ['gemini'],
+                input=prompt,
                 capture_output=True,
                 text=True,
                 check=False,
@@ -95,7 +100,6 @@ def generate():
                      'stderr': result.stderr
                  }), 500
                  
-            # The output from gemini cli is the response
             return jsonify({'response': result.stdout.strip()})
     
         except Exception as e:
