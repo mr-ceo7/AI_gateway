@@ -974,8 +974,20 @@
         // Initial Load
         document.addEventListener('DOMContentLoaded', async () => {
              renderHistoryList();
-             await checkAuthStatus();
-             hideSplashScreen(); // Hide splash screen only after we know auth status
+             
+             // Failsafe: Force hide splash screen after 5 seconds max
+             setTimeout(() => {
+                 console.warn("Splash screen timed out, forcing hide.");
+                 hideSplashScreen();
+             }, 5000);
+
+             try {
+                 await checkAuthStatus();
+             } catch (e) {
+                 console.error("Auth check failed during load:", e);
+             } finally {
+                 hideSplashScreen(); // Hide splash screen only after we know auth status (or it failed)
+             }
         });
 
     </script>
