@@ -28,6 +28,7 @@ def generate():
     else:
         return jsonify({'error': 'Missing prompt or messages'}), 400
 
+    stream = data.get('stream', False)
     # Add debug logging
     print(f"Generating with prompt length: {len(prompt)}", flush=True)
     
