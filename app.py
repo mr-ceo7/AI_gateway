@@ -42,10 +42,14 @@ class GeminiAuthenticator:
             env['TERM'] = 'dumb'
             env['NO_BROWSER'] = 'true'
             
-            # Start 'gemini' with NO_BROWSER=true to trigger auth
+            env = os.environ.copy()
+            env['TERM'] = 'dumb'
+            env['NO_BROWSER'] = 'true'
+            
+            # Start 'gemini "hello"' to force implicit auth check
             # We merge stderr into stdout to catch the URL
             self.auth_process = subprocess.Popen(
-                ['gemini'],
+                ['gemini', 'hello'],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
