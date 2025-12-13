@@ -78,6 +78,9 @@ class GeminiAuthenticator:
         # Regex to strip ANSI codes
         ansi_include_pattern = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         
+        # State to track if we've handled the initial menu
+        menu_handled = False
+
         while True:
             try:
                 # Read from PTY
@@ -92,7 +95,14 @@ class GeminiAuthenticator:
                     
                     # Strip ANSI
                     clean_line = ansi_include_pattern.sub('', line)
-                    
+
+                    # Check for Menu and auto-select "Login with Google" (Option 1)
+                    if not menu_handled and "Login with Google" in clean_line:
+                        print("Auth Monitor: Detecting Auth Menu. Selecting option 1...", flush=True)
+                        time.sleep(1) # Small buffer
+                        os.write(self.master_fd, b'1\n') # Send '1' and Enter
+                        menu_handled = True
+
                     # Check for URL
                     match = url_pattern.search(clean_line)
                     if match:
@@ -101,6 +111,7 @@ class GeminiAuthenticator:
                         if "google.com" in found_url or "accounts" in found_url:
                              self.auth_url = found_url
                              print(f"Auth Monitor: Found URL: {self.auth_url}", flush=True)
+                             # Only notify once or similar logic? Popen will keep running until code is entered.
 
             except OSError:
                 # This happens when the PTY is closed by the child process exiting
