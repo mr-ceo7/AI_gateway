@@ -62,7 +62,8 @@ class GeminiAuthenticator:
             return
 
         print("Auth Monitor: Started reading output...", flush=True)
-        url_pattern = re.compile(r'(https://.*google\.com/.*)')
+        # Relaxed regex to catch any https link, as CLI output might vary
+        url_pattern = re.compile(r'(https://[^\s]+)')
         
         while True:
             line = self.auth_process.stdout.readline()
