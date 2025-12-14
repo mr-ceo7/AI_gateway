@@ -171,19 +171,18 @@ class GeminiAuthenticator:
                 # Write code to the PTY master (which sends it to subprocess stdin)
                 os.write(self.master_fd, code.encode('utf-8'))
                 
-                # Wait for authentication success via active polling
-                print("Auth Monitor: Code submitted. Polling for auth status...", flush=True)
+                # Check immediately once, then return to free the worker
+                print("Auth Monitor: Code submitted. Performing quick check...", flush=True)
+                time.sleep(2) # Short wait for initial processing
                 
-                # Check repeatedly. The CLI takes a moment to validate and save the token.
-                for i in range(15):
-                    time.sleep(3) # Wait 3s between checks
-                    if self.check_auth_status():
-                        print("Auth Monitor: Active check passed! Auth Successful.", flush=True)
-                        self._cleanup_process()
-                        return True, "Authentication successful."
-                    print(f"Auth Monitor: Check {i+1}/15 failed. CLI might still be processing...", flush=True)
+                if self.check_auth_status():
+                     print("Auth Monitor: Quick check passed! Auth Successful.", flush=True)
+                     self._cleanup_process()
+                     return True, "Authentication successful."
                 
-                return False, "Authentication timed out. The CLI did not accept the code in time."
+                # If not immediately successful, return True anyway but let client poll
+                print("Auth Monitor: Code accepted, verification pending...", flush=True)
+                return True, "Code submitted. Verifying..."
 
             except Exception as e:
                 print(f"Auth Monitor: Exception submitting code: {e}", flush=True)

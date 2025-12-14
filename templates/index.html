@@ -957,7 +957,9 @@
                 const data = await res.json();
 
                 if (data.success) {
-                    location.reload(); // Reload to start chatting
+                    // Backend accepted code, but might still be verifying.
+                    // Start polling for success state.
+                    pollForAuthSuccess();
                 } else {
                     throw new Error(data.error || "Verification failed");
                 }
@@ -967,6 +969,26 @@
                 btn.disabled = false;
                 btn.textContent = "Complete Authentication";
             }
+        }
+
+        async function pollForAuthSuccess() {
+            const btn = document.getElementById('auth-submit-btn');
+            // Poll every 3 seconds
+            const interval = setInterval(async () => {
+                try {
+                    const res = await fetch('/api/auth/status');
+                    const data = await res.json();
+
+                    if (data.authenticated) {
+                        clearInterval(interval);
+                        location.reload();
+                    } else {
+                        // Still waiting... user can click Force Complete if stuck
+                    }
+                } catch (e) {
+                    console.error("Auth poll error", e);
+                }
+            }, 3000);
         }
 
         async function forceCompleteAuth() {
