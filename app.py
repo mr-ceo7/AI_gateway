@@ -26,10 +26,6 @@ def clean_gemini_output(text, prompt=None):
             continue
         if l.startswith('Loaded cached credentials'):
             continue
-        if l == "Hello! I'm ready for your first command.":
-            continue
-        if l.startswith('Welcome to Gemini'):
-            continue
         # Remove the echoed user prompt once
         if prompt and not removed_prompt and l == prompt.strip():
             removed_prompt = True
