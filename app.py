@@ -173,8 +173,74 @@ class GeminiAuthenticator:
                 print(f"Auth Monitor: Exception submitting code: {e}", flush=True)
                 return False, f"Error submitting code: {str(e)}"
 
-# ... (omitted parts of file) ...
+authenticator = GeminiAuthenticator()
 
+# Initialize check on startup
+authenticator.check_auth_status()
+if not authenticator.is_authenticated:
+    print("Initial Auth Check Failed. Starting Auth Flow...", flush=True)
+    authenticator.start_auth_flow()
+else:
+    print("Initial Auth Check Passed.", flush=True)
+
+
+@app.route('/api/auth/status')
+def auth_status():
+    status = {
+        'authenticated': authenticator.is_authenticated,
+        'has_url': bool(authenticator.auth_url)
+    }
+    return jsonify(status)
+
+@app.route('/api/auth/url')
+def get_auth_url():
+    if authenticator.auth_url:
+        return jsonify({'url': authenticator.auth_url})
+    return jsonify({'url': None}), 404
+
+@app.route('/api/auth/submit', methods=['POST'])
+def submit_auth_code():
+    data = request.json
+    code = data.get('code')
+    if not code:
+        return jsonify({'error': 'Code required'}), 400
+    
+    success, message = authenticator.submit_code(code)
+    if success:
+        return jsonify({'success': True})
+    else:
+        return jsonify({'success': False, 'error': message}), 400
+
+
+
+@app.route('/')
+def home():
+    return render_template('index.html')
+
+
+@app.route('/api/generate', methods=['POST'])
+def generate():
+    data = request.get_json()
+    
+    if not data:
+        return jsonify({'error': 'Missing request body'}), 400
+
+    prompt = ""
+    if 'messages' in data:
+        # Context Mode: Construct prompt from history
+        for msg in data['messages']:
+            role = "User" if msg['role'] == 'user' else "Model"
+            prompt += f"{role}: {msg['content']}\n"
+    elif 'prompt' in data:
+        # Stateless Mode
+        prompt = data['prompt']
+    else:
+        return jsonify({'error': 'Missing prompt or messages'}), 400
+
+    stream = data.get('stream', False)
+    # Add debug logging
+    print(f"Generating with prompt length: {len(prompt)}", flush=True)
+    
     # Set up environment - mimic simple shell
     env = os.environ.copy()
     env['TERM'] = 'dumb' # Force non-interactive
