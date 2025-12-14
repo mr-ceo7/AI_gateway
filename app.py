@@ -25,7 +25,9 @@ class GeminiAuthenticator:
                 capture_output=True,
                 text=True,
                 check=False,
-                env={'TERM': 'dumb', **os.environ} # Ensure correct env
+                stdin=subprocess.DEVNULL, # Force non-interactive to prevent hanging prompts
+                timeout=10, # Fail fast if it hangs (10s buffer for slow Render instances)
+                env={'TERM': 'dumb', 'NO_BROWSER': 'true', **os.environ} # Ensure correct env
             )
             self.is_authenticated = (result.returncode == 0)
             return self.is_authenticated
@@ -112,13 +114,10 @@ class GeminiAuthenticator:
                              self.auth_url = found_url
                              print(f"Auth Monitor: Found URL: {self.auth_url}", flush=True)
                     
-                    # Check for Success Indicator
                     if "Tips for getting started" in clean_line or "Welcome to Gemini" in clean_line:
-                        print("Auth Monitor: Auth Success Detected!", flush=True)
-                        self.is_authenticated = True
-                        self.auth_url = None
-                        # We can close the process now as we only needed to auth
-                        # self.auth_process.terminate() # Actually, let's leave it to submit_code cleanup or just running
+                        # NOTE: The CLI sometimes prints this even when NOT authenticated (in the banner),
+                        # so we cannot rely on it for success. We will rely on submit_code polling check_auth_status.
+                        pass
 
             except (OSError, TypeError, ValueError):
                 # This happens when the PTY is closed or master_fd is None
@@ -128,6 +127,25 @@ class GeminiAuthenticator:
                 break
         print("Auth Monitor: PTY output monitoring finished.", flush=True)
 
+    def _cleanup_process(self):
+        """Helper to kill the auth process and close fds."""
+        if self.auth_process:
+            try:
+                self.auth_process.terminate()
+                self.auth_process.wait(timeout=2)
+            except:
+                try:
+                    self.auth_process.kill()
+                except:
+                    pass
+            self.auth_process = None
+        
+        if self.master_fd:
+            try:
+                os.close(self.master_fd)
+            except:
+                pass
+            self.master_fd = None
 
     def submit_code(self, code):
         """Writes the auth code to the PTY."""
@@ -145,33 +163,35 @@ class GeminiAuthenticator:
                 # Write code to the PTY master (which sends it to subprocess stdin)
                 os.write(self.master_fd, code.encode('utf-8'))
                 
-                # Wait for authentication success signal
-                print("Auth Monitor: Waiting for success signal...", flush=True)
-                for _ in range(20): # Wait up to 20 seconds
-                    if self.is_authenticated:
-                        print("Auth Monitor: Success signal received!", flush=True)
-                        # Clean up - small delay to let PTY output verify
-                        time.sleep(0.5)
-                        try:
-                            self.auth_process.terminate()
-                            self.auth_process.wait(timeout=2)
-                        except:
-                            pass
-                        if self.master_fd:
-                            try:
-                                os.close(self.master_fd)
-                            except:
-                                pass
-                            self.master_fd = None
-                        self.auth_process = None
-                        return True, "Authentication successful."
-                    time.sleep(1)
+                # Wait for authentication success via active polling
+                print("Auth Monitor: Code submitted. Polling for auth status...", flush=True)
                 
-                return False, "Authentication timed out (success signal not received)."
+                # Check repeatedly. The CLI takes a moment to validate and save the token.
+                for i in range(15):
+                    time.sleep(3) # Wait 3s between checks
+                    if self.check_auth_status():
+                        print("Auth Monitor: Active check passed! Auth Successful.", flush=True)
+                        self._cleanup_process()
+                        return True, "Authentication successful."
+                    print(f"Auth Monitor: Check {i+1}/15 failed. CLI might still be processing...", flush=True)
+                
+                return False, "Authentication timed out. The CLI did not accept the code in time."
 
             except Exception as e:
                 print(f"Auth Monitor: Exception submitting code: {e}", flush=True)
                 return False, f"Error submitting code: {str(e)}"
+
+    def force_terminate(self):
+        """Manually kills the auth process and checks status."""
+        with self.auth_lock:
+            print("Auth Monitor: Force terminating auth process...", flush=True)
+            self._cleanup_process()
+            # Check if we are authenticated now
+            is_authed = self.check_auth_status()
+            if is_authed:
+                return True, "Process terminated. Authentication successful."
+            else:
+                return False, "Process terminated. Authentication failed."
 
 authenticator = GeminiAuthenticator()
 
@@ -210,6 +230,14 @@ def submit_auth_code():
         return jsonify({'success': True})
     else:
         return jsonify({'success': False, 'error': message}), 400
+
+@app.route('/api/auth/terminate', methods=['POST'])
+def auth_terminate():
+    success, message = authenticator.force_terminate()
+    return jsonify({
+        'success': success,
+        'message': message
+    })
 
 
 

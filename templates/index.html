@@ -873,6 +873,16 @@
                     style="background: var(--accent-primary); color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; width: 100%; font-weight: 500;">Complete
                     Authentication</button>
                 <p id="auth-error" style="color: #ef4444; margin-top: 1rem; display: none;"></p>
+                <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border-color);">
+                    <p style="font-size: 0.9rem; color: var(--text-secondary); margin-bottom: 0.5rem;">Stuck? click here
+                        to kill the interactive shell and verify login manually:</p>
+                    <button id="auth-force-btn" onclick="forceCompleteAuth()"
+                        style="background: transparent; border: 1px solid #ef4444; color: #ef4444; padding: 5px 10px; border-radius: 4px; cursor: pointer; font-size: 0.8rem;">
+                        Force Complete
+                    </button>
+                    <p id="force-error" style="color: #ef4444; margin-top: 0.5rem; display: none; font-size: 0.8rem;">
+                    </p>
+                </div>
             </div>
         </div>
     </div>
@@ -956,6 +966,35 @@
                 errorMsg.style.display = 'block';
                 btn.disabled = false;
                 btn.textContent = "Complete Authentication";
+            }
+        }
+
+        async function forceCompleteAuth() {
+            const btn = document.getElementById('auth-force-btn');
+            const errorMsg = document.getElementById('force-error');
+
+            if (!confirm("Only use this if you have already completed the login in the browser but the setup is stuck.\n\nAre you sure you want to force kill the process?")) {
+                return;
+            }
+
+            btn.disabled = true;
+            btn.textContent = "Checking...";
+            errorMsg.style.display = 'none';
+
+            try {
+                const res = await fetch('/api/auth/terminate', { method: 'POST' });
+                const data = await res.json();
+
+                if (data.success) {
+                    location.reload();
+                } else {
+                    throw new Error(data.message || "Manual verification failed.");
+                }
+            } catch (e) {
+                errorMsg.textContent = e.message;
+                errorMsg.style.display = 'block';
+                btn.disabled = false;
+                btn.textContent = "Force Complete";
             }
         }
 
