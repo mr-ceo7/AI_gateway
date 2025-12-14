@@ -32,5 +32,5 @@ echo "----------------------------------------------------------------"
 
 
 # Start the server
-# Use gevent worker for streaming-friendly SSE and no timeout
-exec gunicorn --bind 0.0.0.0:$PORT -k gevent --timeout 0 app:app
+# Use sync worker with timeout 0 to disable for long-running streaming requests
+exec gunicorn --bind 0.0.0.0:$PORT --timeout 0 app:app
