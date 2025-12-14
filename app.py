@@ -93,6 +93,9 @@ class GeminiAuthenticator:
                 for line in output.splitlines():
                     print(f"Auth Output: {line}", flush=True)
                     
+                    # Strip ANSI
+                    clean_line = ansi_include_pattern.sub('', line)
+
                     # Check for Menu and auto-select "Login with Google" (Option 1)
                     if not menu_handled and "Login with Google" in clean_line:
                         print("Auth Monitor: Detecting Auth Menu. Selecting option 1...", flush=True)
