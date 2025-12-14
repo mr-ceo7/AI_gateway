@@ -93,9 +93,6 @@ class GeminiAuthenticator:
                 for line in output.splitlines():
                     print(f"Auth Output: {line}", flush=True)
                     
-                    # Strip ANSI
-                    clean_line = ansi_include_pattern.sub('', line)
-
                     # Check for Menu and auto-select "Login with Google" (Option 1)
                     if not menu_handled and "Login with Google" in clean_line:
                         print("Auth Monitor: Detecting Auth Menu. Selecting option 1...", flush=True)
@@ -111,7 +108,14 @@ class GeminiAuthenticator:
                         if "google.com" in found_url or "accounts" in found_url:
                              self.auth_url = found_url
                              print(f"Auth Monitor: Found URL: {self.auth_url}", flush=True)
-                             # Only notify once or similar logic? Popen will keep running until code is entered.
+                    
+                    # Check for Success Indicator
+                    if "Tips for getting started" in clean_line or "Welcome to Gemini" in clean_line:
+                        print("Auth Monitor: Auth Success Detected!", flush=True)
+                        self.is_authenticated = True
+                        self.auth_url = None
+                        # We can close the process now as we only needed to auth
+                        # self.auth_process.terminate() # Actually, let's leave it to submit_code cleanup or just running
 
             except OSError:
                 # This happens when the PTY is closed by the child process exiting
@@ -138,29 +142,29 @@ class GeminiAuthenticator:
                 # Write code to the PTY master (which sends it to subprocess stdin)
                 os.write(self.master_fd, code.encode('utf-8'))
                 
-                # After submitting the code, we expect the process to finish or continue
-                # We can't immediately check returncode here as it might still be processing.
-                # The _monitor_output thread will continue to read.
-                # For now, we assume submission is successful and let the monitor thread
-                # or a subsequent check_auth_status determine final success.
+                # Wait for authentication success signal
+                print("Auth Monitor: Waiting for success signal...", flush=True)
+                for _ in range(20): # Wait up to 20 seconds
+                    if self.is_authenticated:
+                        print("Auth Monitor: Success signal received!", flush=True)
+                        # Clean up
+                        try:
+                            self.auth_process.terminate()
+                            self.auth_process.wait(timeout=2)
+                        except:
+                            pass
+                        if self.master_fd:
+                            try:
+                                os.close(self.master_fd)
+                            except:
+                                pass
+                            self.master_fd = None
+                        self.auth_process = None
+                        return True, "Authentication successful."
+                    time.sleep(1)
                 
-                # Wait a bit for it to finish and exit
-                # This is a blocking wait, which might not be ideal for a web request.
-                # A better approach would be to poll or have the monitor thread signal completion.
-                # For now, we'll keep a short wait.
-                self.auth_process.wait(timeout=10)
-                
-                if self.auth_process.returncode == 0:
-                    self.is_authenticated = True
-                    self.auth_url = None
-                    # Close the master PTY when done
-                    if self.master_fd:
-                        os.close(self.master_fd)
-                        self.master_fd = None
-                    self.auth_process = None
-                    return True, "Authentication successful."
-                else:
-                    return False, "Authentication failed (process exited with error)."
+                return False, "Authentication timed out (success signal not received)."
+
             except Exception as e:
                 print(f"Auth Monitor: Exception submitting code: {e}", flush=True)
                 return False, f"Error submitting code: {str(e)}"
