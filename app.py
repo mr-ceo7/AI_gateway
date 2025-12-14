@@ -104,6 +104,14 @@ class GeminiAuthenticator:
             return
 
         print("Auth Monitor: Started reading PTY output...", flush=True)
+        
+        # Set PTY to non-blocking mode immediately
+        try:
+            flags = fcntl.fcntl(self.master_fd, fcntl.F_GETFL)
+            fcntl.fcntl(self.master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        except (OSError, ValueError):
+            return
+        
         # Regex to catch the URL
         url_pattern = re.compile(r'(https://[^\s]+)')
         # Regex to strip ANSI codes
@@ -115,11 +123,17 @@ class GeminiAuthenticator:
         while True:
             try:
                 # Check if fd is still valid before reading
-                if self.master_fd is None:
+                if not hasattr(self, 'master_fd') or self.master_fd is None:
                     break
                 
-                # Read from PTY
-                output = os.read(self.master_fd, 1024).decode('utf-8', errors='ignore')
+                # Non-blocking read from PTY
+                try:
+                    output = os.read(self.master_fd, 1024).decode('utf-8', errors='ignore')
+                except (OSError, BlockingIOError):
+                    # No data available, wait and retry
+                    time.sleep(0.1)
+                    continue
+                
                 if not output:
                     # PTY closed or no more output
                     break
