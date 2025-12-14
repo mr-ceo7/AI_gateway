@@ -133,7 +133,7 @@ class GeminiAuthenticator:
             # Try to exit gracefully first to allow saving state
             if self.master_fd:
                 try:
-                    os.write(self.master_fd, b'/exit\n') # Send exit command to gemini CLI
+                    os.write(self.master_fd, b'/quit\r\n') # Send exit command to gemini CLI
                     time.sleep(1)
                 except:
                     pass
