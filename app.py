@@ -9,6 +9,35 @@ import fcntl
 
 app = Flask(__name__)
 
+# Helper to clean Gemini CLI noisy output
+def clean_gemini_output(text, prompt=None):
+    # Strip ANSI escape codes
+    ansi_pattern = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+    text = ansi_pattern.sub('', text or '')
+
+    lines = text.splitlines()
+    cleaned_lines = []
+    removed_prompt = False
+
+    for line in lines:
+        l = line.strip()
+        # Filter known noisy lines
+        if l.startswith('[STARTUP]'):
+            continue
+        if l.startswith('Loaded cached credentials'):
+            continue
+        if l == "Hello! I'm ready for your first command.":
+            continue
+        if l.startswith('Welcome to Gemini'):
+            continue
+        # Remove the echoed user prompt once
+        if prompt and not removed_prompt and l == prompt.strip():
+            removed_prompt = True
+            continue
+        cleaned_lines.append(line)
+
+    return '\n'.join(cleaned_lines).strip()
+
 # Global state for authentication
 class GeminiAuthenticator:
     def __init__(self):
@@ -405,15 +434,25 @@ def generate():
                      return
 
                 print("Prompt written. Reading stdout...", flush=True)
-
+                buffer = ""
                 while True:
-                    # Read larger chunks to avoid overhead, but small enough for streaming
-                    # Note: read(1) is fine for text=True unbuffered
+                    # Read small chunks for responsive streaming
                     chunk = process.stdout.read(1)
                     if not chunk and process.poll() is not None:
+                        # Flush remaining buffer
+                        if buffer:
+                            cleaned_tail = clean_gemini_output(buffer, prompt)
+                            if cleaned_tail:
+                                yield cleaned_tail
                         break
                     if chunk:
-                        yield chunk
+                        buffer += chunk
+                        # Emit complete lines after cleaning
+                        while "\n" in buffer:
+                            line, buffer = buffer.split("\n", 1)
+                            cleaned_line = clean_gemini_output(line, prompt)
+                            if cleaned_line:
+                                yield cleaned_line + "\n"
                 
                 if process.returncode != 0:
                      print(f"Process exited with code {process.returncode}", flush=True)
@@ -443,7 +482,8 @@ def generate():
                      'stderr': result.stderr
                  }), 500
                  
-            return jsonify({'response': result.stdout.strip()})
+            cleaned = clean_gemini_output(result.stdout, prompt)
+            return jsonify({'response': cleaned})
     
         except Exception as e:
             print(f"Exception: {e}", flush=True)
