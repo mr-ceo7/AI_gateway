@@ -15,25 +15,53 @@ class GeminiAuthenticator:
         self.auth_url = None
         self.is_authenticated = False
         self.auth_lock = threading.Lock()
+        self.credentials_path = None
 
     def check_auth_status(self):
-        """Checks if currently authenticated by running a quick command."""
+        """Checks authentication by inspecting credentials instead of probing the CLI."""
+        # Check for Gemini CLI credentials at ~/.gemini/oauth_creds.json
         try:
-            # mimic the check in start.sh
-            result = subprocess.run(
-                ['gemini', 'chat', 'Hello'],
-                capture_output=True,
-                text=True,
-                check=False,
-                stdin=subprocess.DEVNULL, # Force non-interactive to prevent hanging prompts
-                timeout=10, # Fail fast if it hangs (10s buffer for slow Render instances)
-                env={'TERM': 'dumb', 'NO_BROWSER': 'true', **os.environ} # Ensure correct env
-            )
-            self.is_authenticated = (result.returncode == 0)
-            return self.is_authenticated
+            home = os.path.expanduser('~')
+            
+            # Primary: Check for oauth_creds.json with access/refresh tokens
+            oauth_creds_path = os.path.join(home, '.gemini', 'oauth_creds.json')
+            settings_path = os.path.join(home, '.gemini', 'settings.json')
+            accounts_path = os.path.join(home, '.gemini', 'google_accounts.json')
+            
+            # Check oauth_creds.json for tokens
+            try:
+                if os.path.isfile(oauth_creds_path):
+                    import json
+                    with open(oauth_creds_path, 'r', encoding='utf-8') as f:
+                        data = json.loads(f.read().strip())
+                    # Check for OAuth tokens
+                    if any(k in data for k in {'access_token', 'refresh_token'}):
+                        self.is_authenticated = True
+                        self.credentials_path = oauth_creds_path
+                        return True
+            except Exception:
+                pass
+            
+            # Fallback: Check for settings.json + active account in google_accounts.json
+            try:
+                if os.path.isfile(settings_path) and os.path.isfile(accounts_path):
+                    import json
+                    with open(accounts_path, 'r', encoding='utf-8') as f:
+                        accounts_data = json.loads(f.read().strip())
+                    # If there's an active account, likely authenticated
+                    if 'active' in accounts_data and accounts_data['active']:
+                        self.is_authenticated = True
+                        self.credentials_path = accounts_path
+                        return True
+            except Exception:
+                pass
+            
         except Exception:
-            self.is_authenticated = False
-            return False
+            pass
+        
+        self.is_authenticated = False
+        self.credentials_path = None
+        return False
 
 
     def start_auth_flow(self):
