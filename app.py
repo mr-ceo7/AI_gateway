@@ -130,6 +130,14 @@ class GeminiAuthenticator:
     def _cleanup_process(self):
         """Helper to kill the auth process and close fds."""
         if self.auth_process:
+            # Try to exit gracefully first to allow saving state
+            if self.master_fd:
+                try:
+                    os.write(self.master_fd, b'/exit\n') # Send exit command to gemini CLI
+                    time.sleep(1)
+                except:
+                    pass
+
             try:
                 self.auth_process.terminate()
                 self.auth_process.wait(timeout=2)
