@@ -21,10 +21,18 @@ if [ -z "$GEMINI_API_KEY" ]; then
     # We attempt to run anyway, in case there's another auth method (e.g. volume mount)
 fi
 
-# Run a test command to check connectivity
-echo "Checking Gemini CLI..."
-# We use explicit 'chat' command with argument to avoid ambiguity
-gemini chat "Hello World" || echo "WARNING: Gemini CLI check failed. Continuing start-up to enable Auth UI..."
+# Check for credentials using credential inspection (not CLI probing)
+echo "Checking for Gemini CLI credentials..."
+if [ -f ~/.gemini/oauth_creds.json ]; then
+    echo "✓ Found OAuth credentials at ~/.gemini/oauth_creds.json"
+    CREDS_FOUND=true
+elif [ -f ~/.gemini/settings.json ] && [ -f ~/.gemini/google_accounts.json ]; then
+    echo "✓ Found Gemini CLI settings and active account"
+    CREDS_FOUND=true
+else
+    echo "⚠ No credentials found. Auth UI will be available on startup."
+    CREDS_FOUND=false
+fi
 
 echo "----------------------------------------------------------------"
 echo "Starting Web Server with Auth UI..."
