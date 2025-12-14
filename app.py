@@ -186,13 +186,14 @@ class GeminiAuthenticator:
 
     def submit_code(self, code):
         """Writes the auth code to the PTY and waits for success indicators."""
-        with self.auth_lock:
-            if not self.auth_process or self.auth_process.poll() is not None:
-                return False, "Auth process not running."
-            if self.master_fd is None:
-                return False, "PTY master not open."
-            
-            try:
+        success_detected = False
+        try:
+            with self.auth_lock:
+                if not self.auth_process or self.auth_process.poll() is not None:
+                    return False, "Auth process not running."
+                if self.master_fd is None:
+                    return False, "PTY master not open."
+                
                 print(f"Auth Monitor: Submitting code (len={len(code)})...", flush=True)
                 if not code.endswith('\n'):
                     code += '\n'
@@ -223,14 +224,19 @@ class GeminiAuthenticator:
                             # Check for any success indicator
                             if any(indicator in clean_output for indicator in success_indicators):
                                 print(f"Auth Monitor: Detected success indicator in output. Auth Successful.", flush=True)
-                                time.sleep(1)  # Brief pause for final processing
-                                self._cleanup_process()
-                                return True, "Authentication successful."
+                                success_detected = True
+                                break
                     except (OSError, BlockingIOError):
                         # PTY would block, no data available yet
                         pass
                     
                     time.sleep(0.5)  # Check every 500ms
+                
+                if success_detected:
+                    # Brief pause for final processing
+                    time.sleep(1)
+                    self._cleanup_process()
+                    return True, "Authentication successful."
                 
                 # Timeout reached, check credentials file as fallback
                 print("Auth Monitor: Timeout waiting for success indicator, checking credentials file...", flush=True)
@@ -243,9 +249,9 @@ class GeminiAuthenticator:
                 print("Auth Monitor: Code accepted, verification pending...", flush=True)
                 return True, "Code submitted. Verifying..."
 
-            except Exception as e:
-                print(f"Auth Monitor: Exception submitting code: {e}", flush=True)
-                return False, f"Error submitting code: {str(e)}"
+        except Exception as e:
+            print(f"Auth Monitor: Exception submitting code: {e}", flush=True)
+            return False, f"Error submitting code: {str(e)}"
 
     def force_terminate(self):
         """Manually kills the auth process and checks status."""
