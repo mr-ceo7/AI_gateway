@@ -114,6 +114,10 @@ class GeminiAuthenticator:
 
         while True:
             try:
+                # Check if fd is still valid before reading
+                if self.master_fd is None:
+                    break
+                
                 # Read from PTY
                 output = os.read(self.master_fd, 1024).decode('utf-8', errors='ignore')
                 if not output:
@@ -131,9 +135,13 @@ class GeminiAuthenticator:
                     if not menu_handled and "Login with Google" in clean_line:
                         print("Auth Monitor: Detecting Auth Menu. Selecting option 1...", flush=True)
                         time.sleep(1) # Small buffer
-                        os.write(self.master_fd, b'1\n') # Send '1' and Enter
-                        menu_handled = True
-
+                        try:
+                            os.write(self.master_fd, b'1\n') # Send '1' and Enter
+                            menu_handled = True
+                        except (OSError, ValueError):
+                            # fd might be closed
+                            break
+                    
                     # Check for URL
                     match = url_pattern.search(clean_line)
                     if match:
@@ -158,15 +166,17 @@ class GeminiAuthenticator:
 
     def _cleanup_process(self):
         """Helper to kill the auth process and close fds."""
+        # Close fd FIRST before killing process to avoid fd use-after-free
+        if hasattr(self, 'master_fd') and self.master_fd:
+            try:
+                os.close(self.master_fd)
+            except:
+                pass
+            self.master_fd = None
+        
+        # Now kill the process
         if self.auth_process:
             # Try to exit gracefully first to allow saving state
-            if self.master_fd:
-                try:
-                    os.write(self.master_fd, b'\x03\x03') # Send exit command to gemini CLI
-                    time.sleep(1)
-                except:
-                    pass
-
             try:
                 self.auth_process.terminate()
                 self.auth_process.wait(timeout=2)
@@ -176,13 +186,6 @@ class GeminiAuthenticator:
                 except:
                     pass
             self.auth_process = None
-        
-        if self.master_fd:
-            try:
-                os.close(self.master_fd)
-            except:
-                pass
-            self.master_fd = None
 
     def submit_code(self, code):
         """Writes the auth code to the PTY and waits for success indicators."""
