@@ -120,8 +120,8 @@ class GeminiAuthenticator:
                         # We can close the process now as we only needed to auth
                         # self.auth_process.terminate() # Actually, let's leave it to submit_code cleanup or just running
 
-            except OSError:
-                # This happens when the PTY is closed by the child process exiting
+            except (OSError, TypeError, ValueError):
+                # This happens when the PTY is closed or master_fd is None
                 break
             except Exception as e:
                 print(f"Auth Monitor: Error reading PTY output: {e}", flush=True)
@@ -150,7 +150,8 @@ class GeminiAuthenticator:
                 for _ in range(20): # Wait up to 20 seconds
                     if self.is_authenticated:
                         print("Auth Monitor: Success signal received!", flush=True)
-                        # Clean up
+                        # Clean up - small delay to let PTY output verify
+                        time.sleep(0.5)
                         try:
                             self.auth_process.terminate()
                             self.auth_process.wait(timeout=2)
@@ -172,84 +173,22 @@ class GeminiAuthenticator:
                 print(f"Auth Monitor: Exception submitting code: {e}", flush=True)
                 return False, f"Error submitting code: {str(e)}"
 
-authenticator = GeminiAuthenticator()
+# ... (omitted parts of file) ...
 
-# Initialize check on startup
-authenticator.check_auth_status()
-if not authenticator.is_authenticated:
-    print("Initial Auth Check Failed. Starting Auth Flow...", flush=True)
-    authenticator.start_auth_flow()
-else:
-    print("Initial Auth Check Passed.", flush=True)
-
-
-@app.route('/api/auth/status')
-def auth_status():
-    status = {
-        'authenticated': authenticator.is_authenticated,
-        'has_url': bool(authenticator.auth_url)
-    }
-    return jsonify(status)
-
-@app.route('/api/auth/url')
-def get_auth_url():
-    if authenticator.auth_url:
-        return jsonify({'url': authenticator.auth_url})
-    return jsonify({'url': None}), 404
-
-@app.route('/api/auth/submit', methods=['POST'])
-def submit_auth_code():
-    data = request.json
-    code = data.get('code')
-    if not code:
-        return jsonify({'error': 'Code required'}), 400
-    
-    success, message = authenticator.submit_code(code)
-    if success:
-        return jsonify({'success': True})
-    else:
-        return jsonify({'success': False, 'error': message}), 400
-
-
-
-@app.route('/')
-def home():
-    return render_template('index.html')
-
-
-@app.route('/api/generate', methods=['POST'])
-def generate():
-    data = request.get_json()
-    
-    if not data:
-        return jsonify({'error': 'Missing request body'}), 400
-
-    prompt = ""
-    if 'messages' in data:
-        # Context Mode: Construct prompt from history
-        for msg in data['messages']:
-            role = "User" if msg['role'] == 'user' else "Model"
-            prompt += f"{role}: {msg['content']}\n"
-    elif 'prompt' in data:
-        # Stateless Mode
-        prompt = data['prompt']
-    else:
-        return jsonify({'error': 'Missing prompt or messages'}), 400
-
-    stream = data.get('stream', False)
-    # Add debug logging
-    print(f"Generating with prompt length: {len(prompt)}", flush=True)
-    
     # Set up environment - mimic simple shell
     env = os.environ.copy()
     env['TERM'] = 'dumb' # Force non-interactive
+    env['NO_BROWSER'] = 'true'
 
     if stream:
         def generate_output():
             try:
-                # Use ['gemini', 'chat', prompt] which is the robust way to send a message
+                # Use ['gemini'] (REPL) and pipe prompt to stdin
+                # This mimics 'echo "prompt" | gemini' which is proven to work
+                # mocking start.sh behavior.
                 process = subprocess.Popen(
-                    ['gemini', 'chat', prompt],
+                    ['gemini'],
+                    stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, # Merge stderr
                     text=True,
@@ -257,7 +196,18 @@ def generate():
                     env=env
                 )
                 
-                print(f"Started gemini chat with prompt arg (len={len(prompt)}). Reading stdout...", flush=True)
+                print(f"Started gemini REPL with stdin pipe (len={len(prompt)}). Writing prompt...", flush=True)
+                
+                # Write prompt and close stdin to signal EOF
+                # This should make 'gemini' process the input and exit
+                try:
+                    process.stdin.write(prompt)
+                    process.stdin.close()
+                except Exception as e:
+                     print(f"Error writing to stdin: {e}", flush=True)
+                     return
+
+                print("Prompt written. Reading stdout...", flush=True)
 
                 while True:
                     # Read larger chunks to avoid overhead, but small enough for streaming
