@@ -5,6 +5,7 @@ import threading
 import time
 import re
 import pty
+import fcntl
 
 app = Flask(__name__)
 
@@ -184,7 +185,7 @@ class GeminiAuthenticator:
             self.master_fd = None
 
     def submit_code(self, code):
-        """Writes the auth code to the PTY."""
+        """Writes the auth code to the PTY and waits for success indicators."""
         with self.auth_lock:
             if not self.auth_process or self.auth_process.poll() is not None:
                 return False, "Auth process not running."
@@ -199,16 +200,46 @@ class GeminiAuthenticator:
                 # Write code to the PTY master (which sends it to subprocess stdin)
                 os.write(self.master_fd, code.encode('utf-8'))
                 
-                # Check immediately once, then return to free the worker
-                print("Auth Monitor: Code submitted. Performing quick check...", flush=True)
-                time.sleep(2) # Short wait for initial processing
+                # Set PTY to non-blocking mode for reading
+                flags = fcntl.fcntl(self.master_fd, fcntl.F_GETFL)
+                fcntl.fcntl(self.master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
                 
+                # Wait for success indicators in PTY output
+                print("Auth Monitor: Code submitted. Waiting for auth success indicators...", flush=True)
+                success_indicators = {'sandbox', '/app', 'auto'}
+                timeout = 30  # Max 30 seconds to see success indicator
+                start_time = time.time()
+                ansi_pattern = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+                
+                while time.time() - start_time < timeout:
+                    try:
+                        # Non-blocking read from PTY
+                        output = os.read(self.master_fd, 1024).decode('utf-8', errors='ignore')
+                        if output:
+                            # Strip ANSI codes for cleaner matching
+                            clean_output = ansi_pattern.sub('', output)
+                            print(f"Auth Monitor: PTY Output: {clean_output}", flush=True)
+                            
+                            # Check for any success indicator
+                            if any(indicator in clean_output for indicator in success_indicators):
+                                print(f"Auth Monitor: Detected success indicator in output. Auth Successful.", flush=True)
+                                time.sleep(1)  # Brief pause for final processing
+                                self._cleanup_process()
+                                return True, "Authentication successful."
+                    except (OSError, BlockingIOError):
+                        # PTY would block, no data available yet
+                        pass
+                    
+                    time.sleep(0.5)  # Check every 500ms
+                
+                # Timeout reached, check credentials file as fallback
+                print("Auth Monitor: Timeout waiting for success indicator, checking credentials file...", flush=True)
                 if self.check_auth_status():
-                     print("Auth Monitor: Quick check passed! Auth Successful.", flush=True)
-                     self._cleanup_process()
-                     return True, "Authentication successful."
+                    print("Auth Monitor: Credentials verified via file. Auth Successful.", flush=True)
+                    self._cleanup_process()
+                    return True, "Authentication successful."
                 
-                # If not immediately successful, return True anyway but let client poll
+                # If still not successful, let client poll
                 print("Auth Monitor: Code accepted, verification pending...", flush=True)
                 return True, "Code submitted. Verifying..."
 
