@@ -361,6 +361,12 @@
             backdrop-filter: blur(10px);
             border-top: 1px solid var(--glass-border);
             display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        
+        .input-row {
+            display: flex;
             gap: 15px;
             align-items: center;
         }
@@ -422,6 +428,106 @@
             box-shadow: none;
             cursor: not-allowed;
             transform: none;
+        }
+        
+        /* File Upload Styles */
+        .file-upload-btn {
+            width: 55px;
+            height: 55px;
+            border-radius: 15px;
+            border: 1px solid var(--glass-border);
+            background: var(--glass-bg);
+            color: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+        }
+        
+        .file-upload-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            border-color: var(--accent-color);
+        }
+        
+        .file-upload-btn svg {
+            width: 24px;
+            height: 24px;
+            fill: white;
+        }
+        
+        .files-container {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            max-width: 100%;
+            padding: 0;
+        }
+        
+        .file-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            border-radius: 20px;
+            padding: 6px 12px;
+            font-size: 0.85rem;
+            color: rgba(255, 255, 255, 0.9);
+            transition: all 0.2s ease;
+        }
+        
+        .file-chip:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        .file-chip svg {
+            width: 16px;
+            height: 16px;
+            fill: rgba(255, 255, 255, 0.6);
+        }
+        
+        .file-chip .remove-file {
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            padding: 2px;
+            border-radius: 50%;
+            transition: background 0.2s;
+        }
+        
+        .file-chip .remove-file:hover {
+            background: rgba(255, 0, 0, 0.3);
+        }
+        
+        .file-chip .remove-file svg {
+            width: 14px;
+            height: 14px;
+            fill: rgba(255, 255, 255, 0.8);
+        }
+        
+        .drop-zone {
+            border: 2px dashed var(--glass-border);
+            border-radius: 15px;
+            padding: 20px;
+            text-align: center;
+            color: rgba(255, 255, 255, 0.6);
+            transition: all 0.3s ease;
+            margin-bottom: 10px;
+            display: none;
+        }
+        
+        .drop-zone.active {
+            border-color: var(--accent-color);
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--accent-color);
+        }
+        
+        .drop-zone.dragging {
+            display: block;
+            border-color: var(--accent-color);
+            background: rgba(255, 255, 255, 0.08);
+            box-shadow: 0 0 20px var(--accent-glow);
         }
 
         /* Loading Indicator */
@@ -553,14 +659,27 @@
         </div>
 
         <div class="input-area">
-            <div class="input-wrapper">
-                <textarea id="user-input" placeholder="Type your message..." onkeydown="handleEnter(event)"></textarea>
+            <div class="drop-zone" id="drop-zone">
+                Drop files here to upload
             </div>
-            <button class="send-btn" id="send-btn" onclick="sendMessage()">
-                <svg viewBox="0 0 24 24">
-                    <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
-                </svg>
-            </button>
+            <div class="files-container" id="files-container"></div>
+            <div class="input-row">
+                <button class="file-upload-btn" onclick="document.getElementById('file-input').click()" title="Upload file">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6zm-1 2l5 5h-5V4zM6 20V4h6v6h6v10H6z"/>
+                        <path d="M8 15.5h8v1H8zm0-2.5h8v1H8zm0-2.5h5v1H8z"/>
+                    </svg>
+                </button>
+                <div class="input-wrapper">
+                    <textarea id="user-input" placeholder="Type your message..." onkeydown="handleEnter(event)"></textarea>
+                </div>
+                <button class="send-btn" id="send-btn" onclick="sendMessage()">
+                    <svg viewBox="0 0 24 24">
+                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
+                    </svg>
+                </button>
+            </div>
+            <input type="file" id="file-input" style="display: none;" multiple onchange="handleFileSelect(event)">
         </div>
     </div>
 
@@ -676,6 +795,103 @@
             }, 2000);
         }
 
+
+        // --- File Upload Logic ---
+        let uploadedFiles = [];
+
+        function handleFileSelect(event) {
+            const files = event.target.files;
+            uploadFiles(files);
+        }
+
+        async function uploadFiles(files) {
+            for (const file of files) {
+                const formData = new FormData();
+                formData.append('file', file);
+
+                try {
+                    const response = await fetch('/api/upload', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    if (response.ok) {
+                        const result = await response.json();
+                        uploadedFiles.push({
+                            filename: result.filename,
+                            originalName: file.name,
+                            size: result.size
+                        });
+                        renderFileChips();
+                    } else {
+                        console.error('Upload failed:', await response.text());
+                        alert('Failed to upload ' + file.name);
+                    }
+                } catch (error) {
+                    console.error('Upload error:', error);
+                    alert('Error uploading ' + file.name);
+                }
+            }
+        }
+
+        function renderFileChips() {
+            const container = document.getElementById('files-container');
+            container.innerHTML = '';
+
+            uploadedFiles.forEach((file, index) => {
+                const chip = document.createElement('div');
+                chip.className = 'file-chip';
+                chip.innerHTML = `
+                    <svg viewBox="0 0 24 24">
+                        <path d="M14 2H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V8l-6-6z"/>
+                    </svg>
+                    <span>${file.originalName}</span>
+                    <div class="remove-file" onclick="removeFile(${index})">
+                        <svg viewBox="0 0 24 24">
+                            <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/>
+                        </svg>
+                    </div>
+                `;
+                container.appendChild(chip);
+            });
+        }
+
+        function removeFile(index) {
+            uploadedFiles.splice(index, 1);
+            renderFileChips();
+        }
+
+        // Drag and Drop
+        const dropZone = document.getElementById('drop-zone');
+        const inputArea = document.querySelector('.input-area');
+
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            document.body.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            document.body.addEventListener(eventName, () => {
+                dropZone.classList.add('dragging');
+            });
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            document.body.addEventListener(eventName, () => {
+                dropZone.classList.remove('dragging');
+            });
+        });
+
+        document.body.addEventListener('drop', (e) => {
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                uploadFiles(files);
+            }
+        });
 
         // --- Chat Logic ---
         let currentChatId = Date.now().toString();
@@ -796,6 +1012,11 @@
                     messages: history[currentChatId].messages,
                     stream: true
                 };
+                
+                // Add files if any are uploaded
+                if (uploadedFiles.length > 0) {
+                    payload.files = uploadedFiles.map(f => f.filename);
+                }
 
                 const response = await fetch('/api/generate', {
                     method: 'POST',
@@ -830,6 +1051,10 @@
                 // Finalize history
                 history[currentChatId].messages.push({ role: 'ai', content: fullResponse });
                 saveHistory();
+                
+                // Clear uploaded files after sending
+                uploadedFiles = [];
+                renderFileChips();
 
             } catch (err) {
                 loading.style.display = 'none';
