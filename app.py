@@ -479,14 +479,25 @@ def upload_file():
         with open(file_path, 'wb') as f:
             f.write(file_content)
         
-        print(f"File uploaded: {unique_filename} ({len(file_content)} bytes)", flush=True)
+        print(f"[UPLOAD] File uploaded: {unique_filename} ({len(file_content)} bytes, ext={ext})", flush=True)
         
         # Handle PDF extraction
         extracted_txt_path = None
-        if ext.lower() == '.pdf' and HAS_PYPDF2:
-            txt_filename = f"{name}_{file_hash}.txt"
-            txt_path = os.path.join(UPLOAD_DIR, txt_filename)
-            extracted_txt_path = extract_pdf_to_text(file_path, txt_path)
+        if ext.lower() == '.pdf':
+            if not HAS_PYPDF2:
+                print(f"[UPLOAD] WARNING: PyPDF2 not available, cannot extract PDF", flush=True)
+            else:
+                print(f"[UPLOAD] Starting PDF extraction for {unique_filename}...", flush=True)
+                txt_filename = f"{name}_{file_hash}.txt"
+                txt_path = os.path.join(UPLOAD_DIR, txt_filename)
+                extraction_start = time.time()
+                extracted_txt_path = extract_pdf_to_text(file_path, txt_path)
+                extraction_time = time.time() - extraction_start
+                if extracted_txt_path:
+                    txt_size = os.path.getsize(extracted_txt_path)
+                    print(f"[UPLOAD] PDF extraction completed in {extraction_time:.2f}s -> {txt_filename} ({txt_size} bytes)", flush=True)
+                else:
+                    print(f"[UPLOAD] PDF extraction failed after {extraction_time:.2f}s", flush=True)
         
         # Track file in context mode if requested
         if is_context_mode:
@@ -592,6 +603,7 @@ INSTRUCTIONS:
                 # Use ['gemini'] (REPL) and pipe prompt to stdin
                 # This mimics 'echo "prompt" | gemini' which is proven to work
                 # mocking start.sh behavior.
+                print(f"[STREAM] Starting Gemini subprocess...", flush=True)
                 process = subprocess.Popen(
                     ['gemini'],
                     stdin=subprocess.PIPE,
@@ -603,37 +615,58 @@ INSTRUCTIONS:
                     cwd=UPLOAD_DIR  # Run in upload dir so files are accessible
                 )
                 
-                print(f"Started gemini REPL with stdin pipe (len={len(prompt)}). Writing prompt...", flush=True)
+                print(f"[STREAM] Started gemini REPL (pid={process.pid}, prompt_len={len(prompt)}). Writing prompt...", flush=True)
+                
+                # Send initial heartbeat to client
+                yield "data: [SERVER] Initializing Gemini...\n\n"
                 
                 # Write prompt and close stdin to signal EOF
-                # This should make 'gemini' process the input and exit
                 try:
                     process.stdin.write(prompt)
                     process.stdin.close()
+                    print(f"[STREAM] Prompt written successfully, waiting for response...", flush=True)
+                    yield "data: [SERVER] Prompt sent, waiting for AI response...\n\n"
                 except Exception as e:
-                     print(f"Error writing to stdin: {e}", flush=True)
+                     print(f"[STREAM] Error writing to stdin: {e}", flush=True)
+                     yield f"data: [ERROR] Failed to send prompt: {e}\n\n"
                      return
 
-                print("Prompt written. Reading stdout...", flush=True)
                 buffer = ""
+                last_output_time = time.time()
+                chars_received = 0
+                
                 while True:
                     # Read small chunks for responsive streaming
                     chunk = process.stdout.read(1)
+                    
+                    # Send heartbeat every 5 seconds if no output
+                    if not chunk and time.time() - last_output_time > 5:
+                        if process.poll() is None:
+                            print(f"[STREAM] Heartbeat: process alive, {chars_received} chars received", flush=True)
+                            yield "data: [SERVER] Processing... (still working)\n\n"
+                            last_output_time = time.time()
+                    
                     if not chunk and process.poll() is not None:
+                        # Process finished
+                        print(f"[STREAM] Process finished (exit={process.returncode}, chars={chars_received})", flush=True)
                         # Flush remaining buffer
                         if buffer:
                             cleaned_tail = clean_gemini_output(buffer, prompt)
                             if cleaned_tail:
-                                yield cleaned_tail
+                                yield f"data: {cleaned_tail}\n\n"
+                        yield "data: [DONE]\n\n"
                         break
+                    
                     if chunk:
+                        chars_received += 1
+                        last_output_time = time.time()
                         buffer += chunk
                         # Emit complete lines after cleaning
                         while "\n" in buffer:
                             line, buffer = buffer.split("\n", 1)
                             cleaned_line = clean_gemini_output(line, prompt)
                             if cleaned_line:
-                                yield cleaned_line + "\n"
+                                yield f"data: {cleaned_line}\n\n"
                 
                 if process.returncode != 0:
                      print(f"Process exited with code {process.returncode}", flush=True)
@@ -646,29 +679,41 @@ INSTRUCTIONS:
 
     else:
         try:
-            print("Running subprocess.run (gemini chat prompt)...", flush=True)
+            print(f"[NON-STREAM] Starting subprocess.run (prompt_len={len(prompt)})...", flush=True)
+            start_time = time.time()
+            
+            # Run with timeout to detect hanging
             result = subprocess.run(
                 ['gemini', 'chat', prompt],
                 capture_output=True,
                 text=True,
                 check=False,
                 env=env,
-                cwd=UPLOAD_DIR  # Run in upload dir so files are accessible
+                cwd=UPLOAD_DIR,  # Run in upload dir so files are accessible
+                timeout=300  # 5 minute timeout
             )
             
-            print(f"Subprocess finished. Code: {result.returncode}", flush=True)
+            elapsed = time.time() - start_time
+            print(f"[NON-STREAM] Subprocess finished in {elapsed:.2f}s. Exit code: {result.returncode}", flush=True)
+            print(f"[NON-STREAM] Output length: {len(result.stdout)} chars", flush=True)
+            
             if result.returncode != 0:
-                 print(f"Error output: {result.stderr}", flush=True)
+                 print(f"[NON-STREAM] Error output: {result.stderr[:500]}", flush=True)
                  return jsonify({
                      'error': 'Gemini CLI failed',
-                     'stderr': result.stderr
+                     'stderr': result.stderr,
+                     'returncode': result.returncode
                  }), 500
                  
             cleaned = clean_gemini_output(result.stdout, prompt)
+            print(f"[NON-STREAM] Cleaned output length: {len(cleaned)} chars", flush=True)
             return jsonify({'response': cleaned})
     
+        except subprocess.TimeoutExpired:
+            print(f"[NON-STREAM] Request timed out after 300 seconds", flush=True)
+            return jsonify({'error': 'Request timeout - response took too long. Try with stream=true for long operations.'}), 504
         except Exception as e:
-            print(f"Exception: {e}", flush=True)
+            print(f"[NON-STREAM] Exception: {e}", flush=True)
             return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
