@@ -6,8 +6,15 @@ import time
 import re
 import pty
 import fcntl
+import base64
+import hashlib
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
+
+# Directory for uploaded files
+UPLOAD_DIR = os.path.join(os.path.expanduser('~'), '.gemini_uploads')
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Helper to clean Gemini CLI noisy output
 def clean_gemini_output(text, prompt=None):
@@ -374,6 +381,52 @@ def home():
     return render_template('index.html')
 
 
+@app.route('/api/upload', methods=['POST'])
+def upload_file():
+    """Handle file uploads and return file metadata."""
+    try:
+        # Support both multipart form data and JSON with base64
+        if request.files and 'file' in request.files:
+            # Multipart upload
+            file = request.files['file']
+            if file.filename == '':
+                return jsonify({'error': 'No file selected'}), 400
+            
+            filename = secure_filename(file.filename)
+            file_content = file.read()
+        elif request.json and 'file' in request.json:
+            # JSON with base64 encoded file
+            data = request.json
+            filename = secure_filename(data.get('filename', 'uploaded_file'))
+            file_content = base64.b64decode(data['file'])
+        else:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        # Generate unique filename using hash to avoid collisions
+        file_hash = hashlib.md5(file_content).hexdigest()[:8]
+        name, ext = os.path.splitext(filename)
+        unique_filename = f"{name}_{file_hash}{ext}"
+        
+        file_path = os.path.join(UPLOAD_DIR, unique_filename)
+        
+        # Save file
+        with open(file_path, 'wb') as f:
+            f.write(file_content)
+        
+        print(f"File uploaded: {unique_filename} ({len(file_content)} bytes)", flush=True)
+        
+        return jsonify({
+            'success': True,
+            'filename': unique_filename,
+            'size': len(file_content),
+            'path': file_path
+        })
+    
+    except Exception as e:
+        print(f"Upload error: {e}", flush=True)
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/generate', methods=['POST'])
 def generate():
     data = request.get_json()
@@ -392,6 +445,25 @@ def generate():
         prompt = data['prompt']
     else:
         return jsonify({'error': 'Missing prompt or messages'}), 400
+    
+    # Handle file references
+    if 'files' in data and data['files']:
+        file_instructions = "\n\nThe following files are available in the current directory for your reference:\n"
+        for file_info in data['files']:
+            if isinstance(file_info, str):
+                # Simple filename string
+                filename = file_info
+            elif isinstance(file_info, dict):
+                # Object with filename key
+                filename = file_info.get('filename', file_info.get('name', ''))
+            else:
+                continue
+            
+            if filename:
+                file_instructions += f"- {filename}\n"
+        
+        file_instructions += "\nPlease read and analyze these files as needed to answer the user's question.\n"
+        prompt = file_instructions + prompt
 
     stream = data.get('stream', False)
     # Add debug logging
@@ -415,7 +487,8 @@ def generate():
                     stderr=subprocess.STDOUT, # Merge stderr
                     text=True,
                     bufsize=0, # Unbuffered
-                    env=env
+                    env=env,
+                    cwd=UPLOAD_DIR  # Run in upload dir so files are accessible
                 )
                 
                 print(f"Started gemini REPL with stdin pipe (len={len(prompt)}). Writing prompt...", flush=True)
@@ -467,7 +540,8 @@ def generate():
                 capture_output=True,
                 text=True,
                 check=False,
-                env=env
+                env=env,
+                cwd=UPLOAD_DIR  # Run in upload dir so files are accessible
             )
             
             print(f"Subprocess finished. Code: {result.returncode}", flush=True)
