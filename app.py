@@ -9,12 +9,64 @@ import fcntl
 import base64
 import hashlib
 from werkzeug.utils import secure_filename
+try:
+    import PyPDF2
+    HAS_PYPDF2 = True
+except ImportError:
+    HAS_PYPDF2 = False
 
 app = Flask(__name__)
 
 # Directory for uploaded files
 UPLOAD_DIR = os.path.join(os.path.expanduser('~'), '.gemini_uploads')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Track which files are in context mode (should persist across prompts)
+context_mode_files = set()
+
+def clear_upload_directory(except_files=None):
+    """Clear upload directory except for specified files."""
+    if except_files is None:
+        except_files = set()
+    
+    try:
+        for filename in os.listdir(UPLOAD_DIR):
+            filepath = os.path.join(UPLOAD_DIR, filename)
+            if filename not in except_files and os.path.isfile(filepath):
+                try:
+                    os.remove(filepath)
+                    print(f"Cleaned up: {filename}", flush=True)
+                except Exception as e:
+                    print(f"Failed to clean {filename}: {e}", flush=True)
+    except Exception as e:
+        print(f"Error clearing upload directory: {e}", flush=True)
+
+def extract_pdf_to_text(pdf_path, output_path):
+    """Extract text from PDF and save to text file."""
+    if not HAS_PYPDF2:
+        return None
+    
+    try:
+        text_content = []
+        with open(pdf_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            for page_num, page in enumerate(pdf_reader.pages):
+                try:
+                    text = page.extract_text()
+                    if text:
+                        text_content.append(f"--- Page {page_num + 1} ---\n{text}")
+                except Exception as e:
+                    print(f"Error extracting page {page_num}: {e}", flush=True)
+        
+        if text_content:
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write('\n\n'.join(text_content))
+            print(f"Extracted PDF to text: {output_path}", flush=True)
+            return output_path
+    except Exception as e:
+        print(f"PDF extraction error: {e}", flush=True)
+    
+    return None
 
 # Helper to clean Gemini CLI noisy output
 def clean_gemini_output(text, prompt=None):
@@ -383,7 +435,7 @@ def home():
 
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
-    """Handle file uploads and return file metadata."""
+    """Handle file uploads with PDF extraction and context mode support."""
     try:
         # Support both multipart form data and JSON with base64
         if request.files and 'file' in request.files:
@@ -402,10 +454,17 @@ def upload_file():
         else:
             return jsonify({'error': 'No file provided'}), 400
         
+        # Check if this is context mode (preserve existing files)
+        is_context_mode = request.json and request.json.get('context_mode', False) if request.json else False
+        
         # Generate unique filename using hash to avoid collisions
         file_hash = hashlib.md5(file_content).hexdigest()[:8]
         name, ext = os.path.splitext(filename)
         unique_filename = f"{name}_{file_hash}{ext}"
+        
+        # If not context mode, clear old uploads (except context files)
+        if not is_context_mode:
+            clear_upload_directory(except_files=context_mode_files)
         
         file_path = os.path.join(UPLOAD_DIR, unique_filename)
         
@@ -415,11 +474,26 @@ def upload_file():
         
         print(f"File uploaded: {unique_filename} ({len(file_content)} bytes)", flush=True)
         
+        # Handle PDF extraction
+        extracted_txt_path = None
+        if ext.lower() == '.pdf' and HAS_PYPDF2:
+            txt_filename = f"{name}_{file_hash}.txt"
+            txt_path = os.path.join(UPLOAD_DIR, txt_filename)
+            extracted_txt_path = extract_pdf_to_text(file_path, txt_path)
+        
+        # Track file in context mode if requested
+        if is_context_mode:
+            context_mode_files.add(unique_filename)
+            if extracted_txt_path:
+                context_mode_files.add(os.path.basename(extracted_txt_path))
+        
         return jsonify({
             'success': True,
             'filename': unique_filename,
+            'extracted_txt': os.path.basename(extracted_txt_path) if extracted_txt_path else None,
             'size': len(file_content),
-            'path': file_path
+            'path': file_path,
+            'context_mode': is_context_mode
         })
     
     except Exception as e:
@@ -457,8 +531,18 @@ def generate():
                 filename = file_info.get('filename', file_info.get('name', ''))
             else:
                 continue
+            
             if filename:
-                file_list.append(filename)
+                # Check if there's an extracted text version
+                name, ext = os.path.splitext(filename)
+                txt_version = f"{name}.txt"
+                txt_path = os.path.join(UPLOAD_DIR, txt_version)
+                
+                # If extracted text exists, use that
+                if os.path.exists(txt_path):
+                    file_list.append(f"{txt_version} (extracted from {filename})")
+                else:
+                    file_list.append(filename)
         
         if file_list:
             system_prompt = f"""SYSTEM CONTEXT:
@@ -478,6 +562,7 @@ INSTRUCTIONS:
 - Answer the user's question based on the file contents
 - Follow the user's prompt explicitly and completely
 - If you need information from a file, read it directly
+- For PDF files, a text extraction has been provided
 
 """
     
