@@ -446,24 +446,44 @@ def generate():
     else:
         return jsonify({'error': 'Missing prompt or messages'}), 400
     
-    # Handle file references
+    # Handle file references with system prompt
+    system_prompt = ""
     if 'files' in data and data['files']:
-        file_instructions = "\n\nThe following files are available in the current directory for your reference:\n"
+        file_list = []
         for file_info in data['files']:
             if isinstance(file_info, str):
-                # Simple filename string
                 filename = file_info
             elif isinstance(file_info, dict):
-                # Object with filename key
                 filename = file_info.get('filename', file_info.get('name', ''))
             else:
                 continue
-            
             if filename:
-                file_instructions += f"- {filename}\n"
+                file_list.append(filename)
         
-        file_instructions += "\nPlease read and analyze these files as needed to answer the user's question.\n"
-        prompt = file_instructions + prompt
+        if file_list:
+            system_prompt = f"""SYSTEM CONTEXT:
+You are running in NON-INTERACTIVE READ-ONLY mode.
+
+STRICT RESTRICTIONS:
+- You can ONLY READ files - never write, edit, modify, or create files
+- DO NOT attempt to run shell commands, scripts, or executables
+- DO NOT suggest making changes to files
+- DO NOT use any file modification operations
+
+AVAILABLE FILES (read-only):
+{chr(10).join(f'- {f}' for f in file_list)}
+
+INSTRUCTIONS:
+- Read and analyze the files listed above as needed
+- Answer the user's question based on the file contents
+- Follow the user's prompt explicitly and completely
+- If you need information from a file, read it directly
+
+"""
+    
+    # Prepend system prompt if it exists
+    if system_prompt:
+        prompt = system_prompt + "\nUSER PROMPT:\n" + prompt
 
     stream = data.get('stream', False)
     # Add debug logging
