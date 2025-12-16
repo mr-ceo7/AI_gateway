@@ -23,6 +23,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # Track which files are in context mode (should persist across prompts)
 context_mode_files = set()
+last_session_id = None
 
 def clear_upload_directory(except_files=None):
     """Clear upload directory except for specified files."""
@@ -436,6 +437,7 @@ def home():
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
     """Handle file uploads with PDF extraction and context mode support."""
+    global last_session_id
     try:
         # Support both multipart form data and JSON with base64
         if request.files and 'file' in request.files:
@@ -446,25 +448,30 @@ def upload_file():
             
             filename = secure_filename(file.filename)
             file_content = file.read()
-        elif request.json and 'file' in request.json:
+            is_context_mode = request.form.get('context_mode', 'false').lower() == 'true'
+        elif request.is_json and request.json and 'file' in request.json:
             # JSON with base64 encoded file
             data = request.json
             filename = secure_filename(data.get('filename', 'uploaded_file'))
             file_content = base64.b64decode(data['file'])
+            is_context_mode = data.get('context_mode', False)
         else:
             return jsonify({'error': 'No file provided'}), 400
         
-        # Check if this is context mode (preserve existing files)
-        is_context_mode = request.json and request.json.get('context_mode', False) if request.json else False
+        # Get session ID from request (for managing file cleanup across requests)
+        session_id = request.headers.get('X-Session-ID', 'default')
+        
+        # If context mode is False AND it's a new session, clear old uploads
+        if not is_context_mode and session_id != last_session_id:
+            clear_upload_directory(except_files=context_mode_files)
+            last_session_id = session_id
+        elif is_context_mode:
+            last_session_id = session_id  # Update session even in context mode
         
         # Generate unique filename using hash to avoid collisions
         file_hash = hashlib.md5(file_content).hexdigest()[:8]
         name, ext = os.path.splitext(filename)
         unique_filename = f"{name}_{file_hash}{ext}"
-        
-        # If not context mode, clear old uploads (except context files)
-        if not is_context_mode:
-            clear_upload_directory(except_files=context_mode_files)
         
         file_path = os.path.join(UPLOAD_DIR, unique_filename)
         
