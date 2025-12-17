@@ -8,6 +8,8 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
 
     <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
     <link rel="stylesheet"
@@ -224,6 +226,7 @@
             font-size: 3.5rem;
             font-weight: 500;
             background: linear-gradient(90deg, #4285F4, #9B72CB, #D96570);
+            background-clip: text;
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             margin-bottom: 5px;
@@ -306,6 +309,7 @@
         .input-pill:focus-within {
             background: var(--input-focus);
             border-color: rgba(255, 255, 255, 0.3);
+            box-shadow: 0 0 20px rgba(255, 255, 255, 0.15);
         }
 
         .tool-btn {
@@ -402,6 +406,7 @@
             font-size: 2rem;
             font-weight: bold;
             background: linear-gradient(90deg, #4285F4, #D96570);
+            background-clip: text;
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
@@ -586,7 +591,7 @@
                         <path d="M12 5v14M5 12h14" />
                     </svg>
                 </button>
-                <textarea id="user-input" placeholder="Ask Gemini" rows="1" oninput="autoResize(this)"
+                <textarea id="user-input" placeholder="Ask Galvaniy" rows="1" oninput="autoResize(this)"
                     onkeydown="handleEnter(event)"></textarea>
                 <button class="tool-btn" onclick="sendMessage()" style="color: white;">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
@@ -820,7 +825,14 @@
                     const { done, value } = await reader.read();
                     if (done) break;
                     const chunk = decoder.decode(value, { stream: true });
-                    fullResponse += chunk;
+
+                    // Filter out server messages (lines containing [SERVER])
+                    const lines = chunk.split('\n');
+                    const filteredChunk = lines
+                        .filter(line => !line.includes('[SERVER]'))
+                        .join('\n');
+
+                    fullResponse += filteredChunk;
                     aiDiv.innerHTML = marked.parse(fullResponse);
                     container.scrollTop = container.scrollHeight;
                 }
