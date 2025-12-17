@@ -1,4 +1,5 @@
 from flask import Flask, request, jsonify, render_template
+from flask_cors import CORS
 import subprocess
 import os
 import threading
@@ -16,6 +17,15 @@ except ImportError:
     HAS_PYPDF2 = False
 
 app = Flask(__name__)
+
+# Enable CORS for localhost:3000
+CORS(app, resources={
+    r"/api/*": {
+        "origins": ["http://localhost:3000", "http://localhost:3001", "http://192.168.1.192:3000"],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
 
 # Directory for uploaded files
 UPLOAD_DIR = os.path.join(os.path.expanduser('~'), '.gemini_uploads')

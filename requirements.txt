@@ -2,3 +2,4 @@ flask
 gunicorn
 gevent
 PyPDF2
+flask-cors
