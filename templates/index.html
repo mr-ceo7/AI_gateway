@@ -414,9 +414,13 @@
         /* Loading Indicator */
         .typing-indicator {
             display: none;
+            align-items: center;
+            gap: 10px;
             align-self: flex-start;
             margin-left: 10px;
             margin-bottom: 15px;
+            color: var(--text-secondary);
+            font-size: 0.95rem;
         }
 
         .dot {
@@ -576,9 +580,12 @@
         </div>
 
         <div class="typing-indicator" id="loading">
-            <div class="dot"></div>
-            <div class="dot"></div>
-            <div class="dot"></div>
+            <span>Thinking</span>
+            <div style="display: inline-flex; gap: 3px;">
+                <div class="dot"></div>
+                <div class="dot"></div>
+                <div class="dot"></div>
+            </div>
         </div>
 
         <div class="input-wrapper">
@@ -826,10 +833,11 @@
                     if (done) break;
                     const chunk = decoder.decode(value, { stream: true });
 
-                    // Filter out server messages (lines containing [SERVER])
+                    // Filter out server messages and control markers, and remove "data: " prefix
                     const lines = chunk.split('\n');
                     const filteredChunk = lines
-                        .filter(line => !line.includes('[SERVER]'))
+                        .filter(line => !line.includes('[SERVER]') && !line.includes('[DONE]'))
+                        .map(line => line.replace(/^data:\s*/, ''))  // Remove "data: " prefix
                         .join('\n');
 
                     fullResponse += filteredChunk;
