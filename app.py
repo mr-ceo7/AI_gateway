@@ -18,8 +18,31 @@ except ImportError:
 
 app = Flask(__name__)
 
-# Enable CORS for any origin
-CORS(app, resources={r"/api/*": {"origins": "*"}})
+# Enable CORS for API routes and ensure OPTIONS (preflight) requests are handled.
+# Allow common headers used by clients (e.g. Content-Type, X-Session-ID).
+CORS(app,
+     resources={r"/api/*": {"origins": "*"}},
+     supports_credentials=True,
+     allow_headers=["Content-Type", "X-Session-ID", "Authorization"],
+     expose_headers=["Content-Type", "X-Session-ID"],
+     methods=["GET", "POST", "OPTIONS"]
+)
+
+
+@app.before_request
+def _handle_cors_preflight():
+    # Explicitly respond to CORS preflight requests to ensure nginx/ngrok or other
+    # proxies don't drop the `Access-Control-*` headers. This returns a minimal
+    # successful response for OPTIONS requests with the appropriate headers.
+    if request.method == 'OPTIONS':
+        from flask import make_response
+        resp = make_response(('', 204))
+        origin = request.headers.get('Origin', '*')
+        resp.headers['Access-Control-Allow-Origin'] = origin
+        resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Session-ID, Authorization'
+        resp.headers['Access-Control-Allow-Credentials'] = 'true'
+        return resp
 
 # Directory for uploaded files
 UPLOAD_DIR = os.path.join(os.path.expanduser('~'), '.gemini_uploads')
