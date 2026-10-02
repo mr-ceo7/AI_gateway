@@ -1,7 +1,8 @@
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, send_from_directory
 from flask_cors import CORS
 import subprocess
 import os
+import shutil
 import threading
 import time
 import re
@@ -75,7 +76,9 @@ def _handle_cors_preflight():
     if GATEWAY_TOKENS and request.path.startswith('/api/') and request.path != '/api/auth/status':
         if not is_same_origin:
             auth = request.headers.get('Authorization', '')
-            token = auth[7:].strip() if auth.lower().startswith('bearer ') else request.headers.get('X-Gateway-Token', '').strip()
+            token = auth[7:].strip() if auth.lower().startswith('bearer ') else (
+                request.headers.get('X-Gateway-Token', '').strip() or request.args.get('token', '').strip()
+            )
             if not any(hmac.compare_digest(token, t) for t in GATEWAY_TOKENS):
                 return jsonify({'error': 'Missing or wrong gateway token'}), 401
 
@@ -539,6 +542,166 @@ def auth_terminate():
 
 
 
+def format_sse(text):
+    """Format text as Server-Sent Events (SSE) data lines according to standard.
+    Each line of text is prefixed with 'data: ', followed by an empty line delimiter.
+    """
+    if not text:
+        return ""
+    if text.startswith("data: ") and text.endswith("\n\n"):
+        return text
+    lines = text.split('\n')
+    return '\n'.join(f"data: {line}" for line in lines) + "\n\n"
+
+def find_generated_images(session_id, conv_id=None, home_dir=None, since_mtime=None):
+    """Search for image artifacts generated during a conversation turn.
+    Checks:
+    1. The conversation's brain folder: ~/.gemini/antigravity-cli/brain/<conv_id>/
+    2. Candidate brain folders created/updated recently in account home dirs
+    3. The session upload directory: ~/.gemini_uploads/<session_id>/
+    Copies any discovered brain images into session_dir for artifact serving.
+    Returns list of image filenames available in session_dir.
+    """
+    session_dir = get_session_upload_dir(session_id)
+    IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.gif')
+    found_files = []
+
+    search_home_dirs = []
+    if home_dir:
+        search_home_dirs.append(home_dir)
+    primary_acc = account_pool.get_active_account()
+    if primary_acc and primary_acc.get('home_dir'):
+        if primary_acc['home_dir'] not in search_home_dirs:
+            search_home_dirs.append(primary_acc['home_dir'])
+    default_home = os.path.expanduser('~')
+    if default_home not in search_home_dirs:
+        search_home_dirs.append(default_home)
+
+    candidate_conv_dirs = []
+    for h in search_home_dirs:
+        brain_base = os.path.join(h, '.gemini', 'antigravity-cli', 'brain')
+        if not os.path.isdir(brain_base):
+            continue
+
+        if conv_id:
+            specific = os.path.join(brain_base, conv_id)
+            if os.path.isdir(specific) and specific not in candidate_conv_dirs:
+                candidate_conv_dirs.append(specific)
+
+        try:
+            subdirs = [os.path.join(brain_base, d) for d in os.listdir(brain_base) if os.path.isdir(os.path.join(brain_base, d))]
+            subdirs.sort(key=os.path.getmtime, reverse=True)
+            for sd in subdirs[:5]:
+                if sd not in candidate_conv_dirs:
+                    if since_mtime is None or os.path.getmtime(sd) >= (since_mtime - 120):
+                        candidate_conv_dirs.append(sd)
+        except Exception as e:
+            print(f"[IMAGES] Error scanning {brain_base}: {e}", flush=True)
+
+    for c_dir in candidate_conv_dirs:
+        try:
+            # A. Check transcript.jsonl if present
+            transcript_path = os.path.join(c_dir, '.system_generated', 'logs', 'transcript.jsonl')
+            if os.path.isfile(transcript_path):
+                with open(transcript_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    for line in f:
+                        if '"media"' in line:
+                            try:
+                                item = json.loads(line)
+                                media_list = item.get('media', [])
+                                for m in media_list:
+                                    uri = m.get('uri', '')
+                                    local_path = uri[7:] if uri.startswith('file://') else uri
+                                    if local_path and os.path.isfile(local_path) and local_path.lower().endswith(IMAGE_EXTS):
+                                        fname = os.path.basename(local_path)
+                                        dest = os.path.join(session_dir, fname)
+                                        if not os.path.exists(dest):
+                                            shutil.copy2(local_path, dest)
+                                            print(f"[IMAGES] Copied transcript media {fname} to {session_dir}", flush=True)
+                                        if fname not in found_files:
+                                            found_files.append(fname)
+                            except Exception:
+                                pass
+
+            # B. Check image files directly in c_dir root
+            for fname in os.listdir(c_dir):
+                if fname.lower().endswith(IMAGE_EXTS):
+                    fpath = os.path.join(c_dir, fname)
+                    if os.path.isfile(fpath):
+                        if since_mtime and os.path.getmtime(fpath) < (since_mtime - 15):
+                            continue
+                        dest = os.path.join(session_dir, fname)
+                        if not os.path.exists(dest):
+                            shutil.copy2(fpath, dest)
+                            print(f"[IMAGES] Copied brain image {fname} to {session_dir}", flush=True)
+                        if fname not in found_files:
+                            found_files.append(fname)
+        except Exception as e:
+            print(f"[IMAGES] Error scanning candidate dir {c_dir}: {e}", flush=True)
+
+    # C. Check session_dir itself
+    if os.path.isdir(session_dir):
+        try:
+            for fname in os.listdir(session_dir):
+                if fname.lower().endswith(IMAGE_EXTS):
+                    fpath = os.path.join(session_dir, fname)
+                    if os.path.isfile(fpath):
+                        if since_mtime and os.path.getmtime(fpath) < (since_mtime - 15):
+                            continue
+                        if fname not in found_files:
+                            found_files.append(fname)
+        except Exception as e:
+            print(f"[IMAGES] Error scanning session_dir: {e}", flush=True)
+
+    return found_files
+
+
+@app.route('/api/artifacts/<session_id>/<filename>', methods=['GET'])
+def get_artifact(session_id, filename):
+    """Serve an artifact (e.g. generated image) belonging to a session."""
+    session_dir = get_session_upload_dir(session_id)
+    filename = secure_filename(filename)
+    file_path = os.path.join(session_dir, filename)
+
+    if not os.path.isfile(file_path):
+        # Try searching across account brain dirs as fallback
+        IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.gif')
+        if filename.lower().endswith(IMAGE_EXTS):
+            search_dirs = [os.path.expanduser('~')]
+            for acc in account_pool.list_accounts():
+                if acc.get('home_dir') and acc['home_dir'] not in search_dirs:
+                    search_dirs.append(acc['home_dir'])
+            for hdir in search_dirs:
+                brain_base = os.path.join(hdir, '.gemini', 'antigravity-cli', 'brain')
+                if os.path.isdir(brain_base):
+                    for conv in os.listdir(brain_base):
+                        candidate = os.path.join(brain_base, conv, filename)
+                        if os.path.isfile(candidate):
+                            shutil.copy2(candidate, file_path)
+                            return send_from_directory(session_dir, filename)
+
+        return jsonify({'error': 'Artifact not found'}), 404
+
+    return send_from_directory(session_dir, filename)
+
+
+@app.route('/api/artifacts/<session_id>', methods=['GET'])
+def list_artifacts(session_id):
+    """List all generated artifacts for a session."""
+    session_dir = get_session_upload_dir(session_id)
+    IMAGE_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.gif')
+    artifacts = []
+    if os.path.isdir(session_dir):
+        for f in os.listdir(session_dir):
+            if f.lower().endswith(IMAGE_EXTS) and os.path.isfile(os.path.join(session_dir, f)):
+                artifacts.append({
+                    'filename': f,
+                    'url': f'/api/artifacts/{session_id}/{f}',
+                    'size': os.path.getsize(os.path.join(session_dir, f))
+                })
+    return jsonify({'session_id': session_id, 'artifacts': artifacts})
+
+
 @app.route('/')
 def home():
     default_token = next(iter(GATEWAY_TOKENS), '') if GATEWAY_TOKENS else ''
@@ -720,6 +883,19 @@ INSTRUCTIONS:
         prompt = system_prompt + "\nUSER PROMPT:\n" + prompt
 
     stream = data.get('stream', False)
+    # Optional: structured output (a JSON schema the final answer must follow) and reasoning effort
+    extra_args = []
+    effort = data.get('effort')
+    if effort is not None:
+        if effort not in ('low', 'medium', 'high', 'max'):
+            return jsonify({'error': 'effort must be low, medium, high or max'}), 400
+        extra_args += ['--effort', effort]
+    json_schema = data.get('json_schema')
+    if json_schema is not None:
+        if not isinstance(json_schema, dict):
+            return jsonify({'error': 'json_schema must be a JSON object'}), 400
+        extra_args += ['--json-schema', json.dumps(json_schema)]
+        stream = False  # the structured answer arrives whole, in the final result
     # Add debug logging
     print(f"[{session_id}][acc:{acc_id}] Generating with prompt length: {len(prompt)} (stream={stream})", flush=True)
     
@@ -737,7 +913,7 @@ INSTRUCTIONS:
                 import json as json_module
                 print(f"[STREAM][{session_id}][acc:{acc_id}] Starting agy subprocess...", flush=True)
                 process = subprocess.Popen(
-                    ['agy', '-p', prompt, '--output-format', 'stream-json', *AGY_FLAGS],
+                    ['agy', '-p', prompt, '--output-format', 'stream-json', *AGY_FLAGS, *extra_args],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -752,6 +928,8 @@ INSTRUCTIONS:
                 # Send initial heartbeat to client
                 yield "data: [SERVER] Initializing AI...\n\n"
                 
+                turn_start_time = time.time()
+                conv_id = None
                 lines_received = 0
                 text_sent = False
                 for line in process.stdout:
@@ -765,18 +943,24 @@ INSTRUCTIONS:
                     except json_module.JSONDecodeError:
                         cleaned = clean_gemini_output(line, prompt)
                         if cleaned:
-                            yield f"data: {cleaned}\n\n"
+                            yield format_sse(cleaned)
                         continue
                     
                     event_type = event.get('event', '')
-                    if event_type == 'step_update':
+                    if event_type == 'init':
+                        conv_id = event.get('conversation_id')
+                    elif event_type == 'step_update':
                         step = event.get('step_update', {})
+                        if not conv_id:
+                            conv_id = step.get('conversation_id')
                         text_delta = step.get('text_delta', '')
                         if text_delta:
                             text_sent = True
-                            yield f"data: {text_delta}\n\n"
+                            yield format_sse(text_delta)
                     elif event_type == 'result':
                         result_data = event.get('result', {})
+                        if not conv_id:
+                            conv_id = result_data.get('conversation_id')
                         status = result_data.get('status', '')
                         if status != 'SUCCESS':
                             error_msg = result_data.get('error', 'Unknown error')
@@ -793,9 +977,23 @@ INSTRUCTIONS:
                                 final = (result_data.get('response') or '').strip()
                                 denied = [d.get('action') for d in (result_data.get('denied_actions') or [])]
                                 if final:
-                                    yield f"data: {final}\n\n"
+                                    yield format_sse(final)
                                 else:
-                                    yield f"data: [ERROR] No answer from the AI{' (it tried actions that are not allowed: ' + ', '.join(denied) + ')' if denied else ''}\n\n"
+                                    why = f" (it tried actions that are not allowed: {', '.join(denied)})" if denied else ''
+                                    yield f"data: [ERROR] No answer from the AI{why}\n\n"
+
+                            # Detect generated image artifacts and stream markdown
+                            images = find_generated_images(
+                                session_id=session_id,
+                                conv_id=conv_id,
+                                home_dir=account.get('home_dir') if account else None,
+                                since_mtime=turn_start_time
+                            )
+                            for img_file in images:
+                                title = os.path.splitext(img_file)[0].replace('_', ' ').title()
+                                img_markdown = f"\n\n![{title}](/api/artifacts/{session_id}/{img_file})\n\n"
+                                yield format_sse(img_markdown)
+
                         yield "data: [DONE]\n\n"
                         break
                 
@@ -842,7 +1040,7 @@ INSTRUCTIONS:
             
             # Run with timeout to detect hanging
             result = subprocess.run(
-                ['agy', '-p', prompt, '--output-format', 'json', *AGY_FLAGS],
+                ['agy', '-p', prompt, '--output-format', 'json', *AGY_FLAGS, *extra_args],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -866,7 +1064,7 @@ INSTRUCTIONS:
                         retry_env = env.copy()
                         retry_env['HOME'] = next_acc['home_dir']
                         result = subprocess.run(
-                            ['agy', '-p', prompt, '--output-format', 'json', *AGY_FLAGS],
+                            ['agy', '-p', prompt, '--output-format', 'json', *AGY_FLAGS, *extra_args],
                             capture_output=True,
                             text=True,
                             check=False,
@@ -895,7 +1093,31 @@ INSTRUCTIONS:
                 why = f" (it tried actions that are not allowed: {', '.join(denied)})" if denied else ''
                 return jsonify({'error': f'No answer from the AI{why}'}), 502
             cleaned = answer
-            print(f"[NON-STREAM] Cleaned output length: {len(cleaned)} chars", flush=True)
+
+            # Find conversation ID from json output if present
+            conv_id = None
+            try:
+                for l in reversed((result.stdout or '').strip().splitlines()):
+                    d = json.loads(l)
+                    if isinstance(d, dict) and 'conversation_id' in d:
+                        conv_id = d['conversation_id']
+                        break
+            except Exception:
+                pass
+
+            # Detect generated image artifacts and append markdown
+            images = find_generated_images(
+                session_id=session_id,
+                conv_id=conv_id,
+                home_dir=account.get('home_dir') if account else None,
+                since_mtime=start_time
+            )
+            for img_file in images:
+                if img_file not in cleaned:
+                    title = os.path.splitext(img_file)[0].replace('_', ' ').title()
+                    cleaned += f"\n\n![{title}](/api/artifacts/{session_id}/{img_file})\n\n"
+
+            print(f"[NON-STREAM] Cleaned output length: {len(cleaned)} chars (images={len(images)})", flush=True)
             return jsonify({'response': cleaned})
     
         except subprocess.TimeoutExpired:
