@@ -578,25 +578,25 @@ def find_generated_images(session_id, conv_id=None, home_dir=None, since_mtime=N
         search_home_dirs.append(default_home)
 
     candidate_conv_dirs = []
-    for h in search_home_dirs:
-        brain_base = os.path.join(h, '.gemini', 'antigravity-cli', 'brain')
-        if not os.path.isdir(brain_base):
-            continue
-
-        if conv_id:
-            specific = os.path.join(brain_base, conv_id)
+    if conv_id:
+        for h in search_home_dirs:
+            specific = os.path.join(h, '.gemini', 'antigravity-cli', 'brain', conv_id)
             if os.path.isdir(specific) and specific not in candidate_conv_dirs:
                 candidate_conv_dirs.append(specific)
-
-        try:
-            subdirs = [os.path.join(brain_base, d) for d in os.listdir(brain_base) if os.path.isdir(os.path.join(brain_base, d))]
-            subdirs.sort(key=os.path.getmtime, reverse=True)
-            for sd in subdirs[:5]:
-                if sd not in candidate_conv_dirs:
-                    if since_mtime is None or os.path.getmtime(sd) >= (since_mtime - 120):
-                        candidate_conv_dirs.append(sd)
-        except Exception as e:
-            print(f"[IMAGES] Error scanning {brain_base}: {e}", flush=True)
+    elif since_mtime is not None:
+        for h in search_home_dirs:
+            brain_base = os.path.join(h, '.gemini', 'antigravity-cli', 'brain')
+            if not os.path.isdir(brain_base):
+                continue
+            try:
+                subdirs = [os.path.join(brain_base, d) for d in os.listdir(brain_base) if os.path.isdir(os.path.join(brain_base, d))]
+                if subdirs:
+                    subdirs.sort(key=os.path.getmtime, reverse=True)
+                    latest = subdirs[0]
+                    if os.path.getmtime(latest) >= (since_mtime - 3) and latest not in candidate_conv_dirs:
+                        candidate_conv_dirs.append(latest)
+            except Exception as e:
+                print(f"[IMAGES] Error scanning {brain_base}: {e}", flush=True)
 
     for c_dir in candidate_conv_dirs:
         try:
@@ -628,7 +628,7 @@ def find_generated_images(session_id, conv_id=None, home_dir=None, since_mtime=N
                 if fname.lower().endswith(IMAGE_EXTS):
                     fpath = os.path.join(c_dir, fname)
                     if os.path.isfile(fpath):
-                        if since_mtime and os.path.getmtime(fpath) < (since_mtime - 15):
+                        if since_mtime and os.path.getmtime(fpath) < (since_mtime - 3):
                             continue
                         dest = os.path.join(session_dir, fname)
                         if not os.path.exists(dest):
@@ -639,15 +639,13 @@ def find_generated_images(session_id, conv_id=None, home_dir=None, since_mtime=N
         except Exception as e:
             print(f"[IMAGES] Error scanning candidate dir {c_dir}: {e}", flush=True)
 
-    # C. Check session_dir itself
-    if os.path.isdir(session_dir):
+    # C. Check session_dir itself for images created during this turn
+    if os.path.isdir(session_dir) and since_mtime is not None:
         try:
             for fname in os.listdir(session_dir):
                 if fname.lower().endswith(IMAGE_EXTS):
                     fpath = os.path.join(session_dir, fname)
-                    if os.path.isfile(fpath):
-                        if since_mtime and os.path.getmtime(fpath) < (since_mtime - 15):
-                            continue
+                    if os.path.isfile(fpath) and os.path.getmtime(fpath) >= (since_mtime - 2):
                         if fname not in found_files:
                             found_files.append(fname)
         except Exception as e:
