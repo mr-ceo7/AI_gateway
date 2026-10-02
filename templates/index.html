@@ -165,15 +165,8 @@
         .user-avatar {
             width: 32px;
             height: 32px;
-            background: #2D2E30;
-            border: 1px solid rgba(255, 255, 255, 0.15);
+            background: linear-gradient(135deg, #ff00cc, #333399);
             border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 11px;
-            font-weight: 600;
-            color: var(--text-primary);
         }
 
         /* Chat Container */
@@ -246,21 +239,22 @@
         }
 
         .greeting-text {
-            font-size: 3.2rem;
-            font-weight: 600;
-            color: #FFFFFF;
-            letter-spacing: -0.03em;
-            margin-bottom: 6px;
-            line-height: 1.15;
+            font-size: 3.5rem;
+            font-weight: 500;
+            background: linear-gradient(90deg, #4285F4, #9B72CB, #D96570);
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 5px;
+            line-height: 1.1;
         }
 
         .sub-greeting {
-            font-size: 2.8rem;
-            font-weight: 400;
-            color: #8E918F;
-            letter-spacing: -0.02em;
+            font-size: 3.5rem;
+            font-weight: 500;
+            color: #444746;
             margin-bottom: 40px;
-            line-height: 1.15;
+            line-height: 1.1;
         }
 
         .suggestion-cards {
@@ -488,12 +482,12 @@
         }
 
         .splash-text {
-            font-size: 1.8rem;
-            font-weight: 600;
-            color: #FFFFFF;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-            font-family: monospace;
+            font-size: 2rem;
+            font-weight: bold;
+            background: linear-gradient(90deg, #4285F4, #D96570);
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
         }
 
         /* Loading Indicator */
