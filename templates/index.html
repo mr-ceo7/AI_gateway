@@ -678,6 +678,23 @@
     </div>
 
     <script>
+        // Every API call carries the gateway token (asked for once, kept in this browser)
+        async function gwFetch(url, opts = {}) {
+            const withToken = (o) => {
+                const token = localStorage.getItem('gateway_token') || '';
+                return { ...o, headers: { ...(o.headers || {}), ...(token ? { 'Authorization': 'Bearer ' + token } : {}) } };
+            };
+            let res = await fetch(url, withToken(opts));
+            if (res.status === 401) {
+                const token = window.prompt('Gateway access token:');
+                if (token) {
+                    localStorage.setItem('gateway_token', token.trim());
+                    res = await fetch(url, withToken(opts));
+                }
+            }
+            return res;
+        }
+
         // --- UI Interactions ---
         function toggleSidebar() {
             document.getElementById('sidebar').classList.toggle('active');
@@ -731,7 +748,7 @@
                 const formData = new FormData();
                 formData.append('file', file);
                 try {
-                    const res = await fetch('/api/upload', {
+                    const res = await gwFetch('/api/upload', {
                         method: 'POST',
                         headers: { 'X-Session-ID': currentChatId },
                         body: formData
@@ -917,7 +934,7 @@
                     session_id: currentChatId
                 };
 
-                const res = await fetch('/api/generate', {
+                const res = await gwFetch('/api/generate', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -990,7 +1007,7 @@
         async function checkAuthStatus() {
             console.log("Checking auth status...");
             try {
-                const res = await fetch('/api/auth/status');
+                const res = await gwFetch('/api/auth/status');
                 console.log("Auth status response received:", res.status);
                 const data = await res.json();
 
@@ -1012,7 +1029,7 @@
 
             const interval = setInterval(async () => {
                 try {
-                    const res = await fetch('/api/auth/url');
+                    const res = await gwFetch('/api/auth/url');
                     const data = await res.json();
 
                     if (data.url) {
@@ -1032,7 +1049,7 @@
             const errorMsg = document.getElementById('auth-error');
 
             try {
-                const res = await fetch('/api/auth/submit', {
+                const res = await gwFetch('/api/auth/submit', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ code })
@@ -1054,7 +1071,7 @@
         async function pollForAuthSuccess() {
             const interval = setInterval(async () => {
                 try {
-                    const res = await fetch('/api/auth/status');
+                    const res = await gwFetch('/api/auth/status');
                     const data = await res.json();
                     if (data.authenticated) {
                         clearInterval(interval);
@@ -1065,7 +1082,7 @@
         }
 
         async function forceCompleteAuth() {
-            await fetch('/api/auth/terminate', { method: 'POST' });
+            await gwFetch('/api/auth/terminate', { method: 'POST' });
             location.reload();
         }
 

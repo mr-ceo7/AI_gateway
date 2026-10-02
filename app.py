@@ -9,6 +9,8 @@ import pty
 import fcntl
 import base64
 import hashlib
+import hmac
+import json
 from werkzeug.utils import secure_filename
 from utils.account_pool import AccountPool, is_quota_error
 try:
@@ -19,14 +21,29 @@ except ImportError:
 
 app = Flask(__name__)
 
+# --- Access and safety settings (environment) ---
+# GATEWAY_TOKENS: comma-separated secrets; every /api call except the health check must send one
+#   (Authorization: Bearer <token>, or X-Gateway-Token). Unset = open, with a warning (old behaviour).
+# CORS_ORIGINS: comma-separated websites allowed to call the API from a browser. Unset = none
+#   (the gateway's own page and server-to-server callers don't need CORS).
+# UPLOAD_TTL_SECONDS: uploads older than this are deleted (default 6 hours).
+GATEWAY_TOKENS = {t.strip() for t in os.environ.get('GATEWAY_TOKENS', '').split(',') if t.strip()}
+CORS_ORIGINS = [o.strip() for o in os.environ.get('CORS_ORIGINS', '').split(',') if o.strip()]
+UPLOAD_TTL_SECONDS = int(os.environ.get('UPLOAD_TTL_SECONDS', str(6 * 3600)))
+# The agent always runs sandboxed and can't expand slash commands from prompt text. What it may do is set in its
+# settings (~/.gemini/antigravity-cli/settings.json): no writes, no commands, no access outside the session folder.
+AGY_FLAGS = ['--sandbox', '--disable-slash-commands']
+if not GATEWAY_TOKENS:
+    print("WARNING: GATEWAY_TOKENS is not set: anyone who can reach this gateway can use it.", flush=True)
+
 # Account Rotation Pool for multi-account quota failover
 account_pool = AccountPool()
 
 # Enable CORS for API routes and ensure OPTIONS (preflight) requests are handled.
 # Allow common headers used by clients (e.g. Content-Type, X-Session-ID).
 CORS(app,
-     resources={r"/api/*": {"origins": "*"}},
-     supports_credentials=True,
+     resources={r"/api/*": {"origins": CORS_ORIGINS or []}},
+     supports_credentials=False,
      allow_headers=["Content-Type", "X-Session-ID", "Authorization"],
      expose_headers=["Content-Type", "X-Session-ID"],
      methods=["GET", "POST", "OPTIONS"]
@@ -41,12 +58,19 @@ def _handle_cors_preflight():
     if request.method == 'OPTIONS':
         from flask import make_response
         resp = make_response(('', 204))
-        origin = request.headers.get('Origin', '*')
-        resp.headers['Access-Control-Allow-Origin'] = origin
-        resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Session-ID, Authorization'
-        resp.headers['Access-Control-Allow-Credentials'] = 'true'
+        origin = request.headers.get('Origin', '')
+        if origin in CORS_ORIGINS:  # only listed websites, never "whoever asks"
+            resp.headers['Access-Control-Allow-Origin'] = origin
+            resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+            resp.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Session-ID, Authorization, X-Gateway-Token'
+            resp.headers['Vary'] = 'Origin'
         return resp
+    # Every API call needs a token, except the health check
+    if GATEWAY_TOKENS and request.path.startswith('/api/') and request.path != '/api/auth/status':
+        auth = request.headers.get('Authorization', '')
+        token = auth[7:].strip() if auth.lower().startswith('bearer ') else request.headers.get('X-Gateway-Token', '').strip()
+        if not any(hmac.compare_digest(token, t) for t in GATEWAY_TOKENS):
+            return jsonify({'error': 'Missing or wrong gateway token'}), 401
 
 # Root directory for uploaded files
 UPLOAD_DIR = os.path.join(os.path.expanduser('~'), '.gemini_uploads')
@@ -80,6 +104,30 @@ def clear_session_upload_directory(session_id, except_files=None):
     except Exception as e:
         print(f"Error clearing session directory ({session_id}): {e}", flush=True)
 
+def sweep_old_uploads():
+    """Delete uploaded files (and emptied session folders) older than UPLOAD_TTL_SECONDS."""
+    cutoff = time.time() - UPLOAD_TTL_SECONDS
+    try:
+        for root, dirs, files in os.walk(UPLOAD_DIR, topdown=False):
+            # judged before removing files (removing them refreshes the folder's time)
+            old_dir = root != UPLOAD_DIR and os.path.getmtime(root) < cutoff
+            for name in files:
+                path = os.path.join(root, name)
+                try:
+                    if os.path.getmtime(path) < cutoff:
+                        os.remove(path)
+                except OSError:
+                    pass
+            # only folders that are themselves old (never one a request just created)
+            if old_dir and not os.listdir(root):
+                try:
+                    os.rmdir(root)
+                except OSError:
+                    pass
+    except Exception as e:
+        print(f"Upload sweep error: {e}", flush=True)
+
+
 def clear_upload_directory(except_files=None, session_id='default'):
     """Backward compatible wrapper for clearing upload directory."""
     clear_session_upload_directory(session_id, except_files=except_files)
@@ -110,6 +158,19 @@ def extract_pdf_to_text(pdf_path, output_path):
         print(f"PDF extraction error: {e}", flush=True)
     
     return None
+
+def json_answer(stdout):
+    """(answer, denied actions) from agy's --output-format json output, or (None, []) if it isn't JSON."""
+    for line in reversed((stdout or '').strip().splitlines()):
+        try:
+            data = json.loads(line)
+        except ValueError:
+            continue
+        result = data.get('result', data) if isinstance(data, dict) else {}
+        if isinstance(result, dict) and ('response' in result or 'status' in result):
+            return (result.get('response') or ''), [d.get('action') for d in (result.get('denied_actions') or [])]
+    return None, []
+
 
 # Helper to clean Gemini CLI noisy output
 def clean_gemini_output(text, prompt=None):
@@ -480,6 +541,7 @@ def home():
 def upload_file():
     """Handle file uploads with PDF extraction and context mode support."""
     global last_session_id
+    sweep_old_uploads()  # before this request creates its session folder
     try:
         # Support both multipart form data and JSON with base64
         if request.files and 'file' in request.files:
@@ -505,9 +567,8 @@ def upload_file():
         session_dir = get_session_upload_dir(session_id)
         session_context_files = context_mode_files.setdefault(session_id, set())
         
-        # If context mode is False, clear previous temporary uploads for this session
-        if not is_context_mode:
-            clear_session_upload_directory(session_id, except_files=session_context_files)
+        # Uploads no longer clear the session's other files (files attached together used to delete each other);
+        # old files are swept after UPLOAD_TTL_SECONDS instead (see the top of this function)
         
         # Generate unique filename using hash to avoid collisions
         file_hash = hashlib.md5(file_content).hexdigest()[:8]
@@ -551,7 +612,6 @@ def upload_file():
             'filename': unique_filename,
             'extracted_txt': os.path.basename(extracted_txt_path) if extracted_txt_path else None,
             'size': len(file_content),
-            'path': file_path,
             'context_mode': is_context_mode,
             'session_id': session_id
         })
@@ -620,12 +680,9 @@ def generate():
                 
                 # If extracted text exists, use that
                 if os.path.exists(txt_path):
-                    file_list.append(f"{txt_version} (extracted from {filename})")
+                    file_list.append(f"{txt_path} (text extracted from {filename})")
                 elif os.path.exists(os.path.join(session_dir, filename)):
-                    file_list.append(filename)
-                elif os.path.exists(os.path.join(UPLOAD_DIR, filename)):
-                    # Fallback for legacy root uploads
-                    file_list.append(filename)
+                    file_list.append(os.path.join(session_dir, filename))
         
         if file_list:
             system_prompt = f"""SYSTEM CONTEXT:
@@ -644,9 +701,9 @@ INSTRUCTIONS:
 - Read and analyze the files listed above as needed
 - Answer the user's question based on the file contents
 - Follow the user's prompt explicitly and completely
-- If you need information from a file, read it directly
+- Read files only with your view_file tool, using the paths listed above; never run commands to look at them
 - For PDF files, a text extraction has been provided
-- For image files (PNG, JPG, JPEG, WEBP, GIF), inspect their visual contents directly
+- For image files (PNG, JPG, JPEG, WEBP, GIF), open them with view_file and look at their contents
 
 """
     
@@ -672,7 +729,7 @@ INSTRUCTIONS:
                 import json as json_module
                 print(f"[STREAM][{session_id}][acc:{acc_id}] Starting agy subprocess...", flush=True)
                 process = subprocess.Popen(
-                    ['agy', '-p', prompt, '--output-format', 'stream-json'],
+                    ['agy', '-p', prompt, '--output-format', 'stream-json', *AGY_FLAGS],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -688,6 +745,7 @@ INSTRUCTIONS:
                 yield "data: [SERVER] Initializing AI...\n\n"
                 
                 lines_received = 0
+                text_sent = False
                 for line in process.stdout:
                     line = line.strip()
                     if not line:
@@ -707,6 +765,7 @@ INSTRUCTIONS:
                         step = event.get('step_update', {})
                         text_delta = step.get('text_delta', '')
                         if text_delta:
+                            text_sent = True
                             yield f"data: {text_delta}\n\n"
                     elif event_type == 'result':
                         result_data = event.get('result', {})
@@ -720,6 +779,15 @@ INSTRUCTIONS:
                         else:
                             if account:
                                 account_pool.record_success(acc_id)
+                            if not text_sent:
+                                # The answer can arrive only in the result, or not at all when the agent tried
+                                # something it isn't allowed to do: say so instead of ending silently
+                                final = (result_data.get('response') or '').strip()
+                                denied = [d.get('action') for d in (result_data.get('denied_actions') or [])]
+                                if final:
+                                    yield f"data: {final}\n\n"
+                                else:
+                                    yield f"data: [ERROR] No answer from the AI{' (it tried actions that are not allowed: ' + ', '.join(denied) + ')' if denied else ''}\n\n"
                         yield "data: [DONE]\n\n"
                         break
                 
@@ -766,7 +834,7 @@ INSTRUCTIONS:
             
             # Run with timeout to detect hanging
             result = subprocess.run(
-                ['agy', '-p', prompt],
+                ['agy', '-p', prompt, '--output-format', 'json', *AGY_FLAGS],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -790,7 +858,7 @@ INSTRUCTIONS:
                         retry_env = env.copy()
                         retry_env['HOME'] = next_acc['home_dir']
                         result = subprocess.run(
-                            ['agy', '-p', prompt],
+                            ['agy', '-p', prompt, '--output-format', 'json', *AGY_FLAGS],
                             capture_output=True,
                             text=True,
                             check=False,
@@ -812,7 +880,13 @@ INSTRUCTIONS:
                 if account:
                     account_pool.record_success(acc_id)
                  
-            cleaned = clean_gemini_output(result.stdout, prompt)
+            answer, denied = json_answer(result.stdout)
+            if answer is None:  # not JSON (older agy): fall back to the text cleaner
+                answer = clean_gemini_output(result.stdout, prompt)
+            if not answer.strip():
+                why = f" (it tried actions that are not allowed: {', '.join(denied)})" if denied else ''
+                return jsonify({'error': f'No answer from the AI{why}'}), 502
+            cleaned = answer
             print(f"[NON-STREAM] Cleaned output length: {len(cleaned)} chars", flush=True)
             return jsonify({'response': cleaned})
     
