@@ -10,6 +10,7 @@ import fcntl
 import base64
 import hashlib
 from werkzeug.utils import secure_filename
+from utils.account_pool import AccountPool, is_quota_error
 try:
     import PyPDF2
     HAS_PYPDF2 = True
@@ -17,6 +18,9 @@ except ImportError:
     HAS_PYPDF2 = False
 
 app = Flask(__name__)
+
+# Account Rotation Pool for multi-account quota failover
+account_pool = AccountPool()
 
 # Enable CORS for API routes and ensure OPTIONS (preflight) requests are handled.
 # Allow common headers used by clients (e.g. Content-Type, X-Session-ID).
@@ -44,30 +48,41 @@ def _handle_cors_preflight():
         resp.headers['Access-Control-Allow-Credentials'] = 'true'
         return resp
 
-# Directory for uploaded files
+# Root directory for uploaded files
 UPLOAD_DIR = os.path.join(os.path.expanduser('~'), '.gemini_uploads')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Track which files are in context mode (should persist across prompts)
-context_mode_files = set()
-last_session_id = None
+# Track files in context mode per session: Dict[session_id, set_of_filenames]
+context_mode_files = {}
 
-def clear_upload_directory(except_files=None):
-    """Clear upload directory except for specified files."""
+def get_session_upload_dir(session_id=None):
+    """Return an isolated directory for the given session ID."""
+    safe_session = re.sub(r'[^a-zA-Z0-9_-]', '_', session_id or 'default')[:64]
+    session_dir = os.path.join(UPLOAD_DIR, safe_session)
+    os.makedirs(session_dir, exist_ok=True)
+    return session_dir
+
+def clear_session_upload_directory(session_id, except_files=None):
+    """Clear upload directory for a specific session except for specified files."""
     if except_files is None:
         except_files = set()
-    
+    session_dir = get_session_upload_dir(session_id)
     try:
-        for filename in os.listdir(UPLOAD_DIR):
-            filepath = os.path.join(UPLOAD_DIR, filename)
-            if filename not in except_files and os.path.isfile(filepath):
-                try:
-                    os.remove(filepath)
-                    print(f"Cleaned up: {filename}", flush=True)
-                except Exception as e:
-                    print(f"Failed to clean {filename}: {e}", flush=True)
+        if os.path.isdir(session_dir):
+            for filename in os.listdir(session_dir):
+                filepath = os.path.join(session_dir, filename)
+                if filename not in except_files and os.path.isfile(filepath):
+                    try:
+                        os.remove(filepath)
+                        print(f"[{session_id}] Cleaned up: {filename}", flush=True)
+                    except Exception as e:
+                        print(f"[{session_id}] Failed to clean {filename}: {e}", flush=True)
     except Exception as e:
-        print(f"Error clearing upload directory: {e}", flush=True)
+        print(f"Error clearing session directory ({session_id}): {e}", flush=True)
+
+def clear_upload_directory(except_files=None, session_id='default'):
+    """Backward compatible wrapper for clearing upload directory."""
+    clear_session_upload_directory(session_id, except_files=except_files)
 
 def extract_pdf_to_text(pdf_path, output_path):
     """Extract text from PDF and save to text file."""
@@ -190,10 +205,10 @@ class GeminiAuthenticator:
             # Create a pseudo-terminal
             master_fd, slave_fd = pty.openpty()
             
-            # Start 'gemini' (interactive REPL) to trigger auth flow
+            # Start 'agy' (interactive REPL) to trigger auth flow
             # We connect stdout/stdin to the PTY
             self.auth_process = subprocess.Popen(
-                ['gemini'],
+                ['agy'],
                 stdin=slave_fd,
                 stdout=slave_fd,
                 stderr=slave_fd, # Merge all output to PTY
@@ -485,52 +500,51 @@ def upload_file():
         else:
             return jsonify({'error': 'No file provided'}), 400
         
-        # Get session ID from request (for managing file cleanup across requests)
-        session_id = request.headers.get('X-Session-ID', 'default')
+        # Get session ID from request (header, form data, or JSON)
+        session_id = request.headers.get('X-Session-ID') or (request.form.get('session_id') if request.form else None) or 'default'
+        session_dir = get_session_upload_dir(session_id)
+        session_context_files = context_mode_files.setdefault(session_id, set())
         
-        # If context mode is False AND it's a new session, clear old uploads
-        if not is_context_mode and session_id != last_session_id:
-            clear_upload_directory(except_files=context_mode_files)
-            last_session_id = session_id
-        elif is_context_mode:
-            last_session_id = session_id  # Update session even in context mode
+        # If context mode is False, clear previous temporary uploads for this session
+        if not is_context_mode:
+            clear_session_upload_directory(session_id, except_files=session_context_files)
         
         # Generate unique filename using hash to avoid collisions
         file_hash = hashlib.md5(file_content).hexdigest()[:8]
         name, ext = os.path.splitext(filename)
         unique_filename = f"{name}_{file_hash}{ext}"
         
-        file_path = os.path.join(UPLOAD_DIR, unique_filename)
+        file_path = os.path.join(session_dir, unique_filename)
         
         # Save file
         with open(file_path, 'wb') as f:
             f.write(file_content)
         
-        print(f"[UPLOAD] File uploaded: {unique_filename} ({len(file_content)} bytes, ext={ext})", flush=True)
+        print(f"[UPLOAD][{session_id}] File uploaded: {unique_filename} ({len(file_content)} bytes, ext={ext})", flush=True)
         
         # Handle PDF extraction
         extracted_txt_path = None
         if ext.lower() == '.pdf':
             if not HAS_PYPDF2:
-                print(f"[UPLOAD] WARNING: PyPDF2 not available, cannot extract PDF", flush=True)
+                print(f"[UPLOAD][{session_id}] WARNING: PyPDF2 not available, cannot extract PDF", flush=True)
             else:
-                print(f"[UPLOAD] Starting PDF extraction for {unique_filename}...", flush=True)
+                print(f"[UPLOAD][{session_id}] Starting PDF extraction for {unique_filename}...", flush=True)
                 txt_filename = f"{name}_{file_hash}.txt"
-                txt_path = os.path.join(UPLOAD_DIR, txt_filename)
+                txt_path = os.path.join(session_dir, txt_filename)
                 extraction_start = time.time()
                 extracted_txt_path = extract_pdf_to_text(file_path, txt_path)
                 extraction_time = time.time() - extraction_start
                 if extracted_txt_path:
                     txt_size = os.path.getsize(extracted_txt_path)
-                    print(f"[UPLOAD] PDF extraction completed in {extraction_time:.2f}s -> {txt_filename} ({txt_size} bytes)", flush=True)
+                    print(f"[UPLOAD][{session_id}] PDF extraction completed in {extraction_time:.2f}s -> {txt_filename} ({txt_size} bytes)", flush=True)
                 else:
-                    print(f"[UPLOAD] PDF extraction failed after {extraction_time:.2f}s", flush=True)
+                    print(f"[UPLOAD][{session_id}] PDF extraction failed after {extraction_time:.2f}s", flush=True)
         
         # Track file in context mode if requested
         if is_context_mode:
-            context_mode_files.add(unique_filename)
+            session_context_files.add(unique_filename)
             if extracted_txt_path:
-                context_mode_files.add(os.path.basename(extracted_txt_path))
+                session_context_files.add(os.path.basename(extracted_txt_path))
         
         return jsonify({
             'success': True,
@@ -538,12 +552,25 @@ def upload_file():
             'extracted_txt': os.path.basename(extracted_txt_path) if extracted_txt_path else None,
             'size': len(file_content),
             'path': file_path,
-            'context_mode': is_context_mode
+            'context_mode': is_context_mode,
+            'session_id': session_id
         })
     
     except Exception as e:
         print(f"Upload error: {e}", flush=True)
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/accounts', methods=['GET'])
+def list_accounts():
+    """Return all registered accounts in the rotation pool and their status."""
+    accounts = account_pool.list_accounts()
+    active = account_pool.get_active_account()
+    return jsonify({
+        'total': len(accounts),
+        'active_account': active.get('id') if active else None,
+        'accounts': accounts
+    })
 
 
 @app.route('/api/generate', methods=['POST'])
@@ -565,6 +592,14 @@ def generate():
     else:
         return jsonify({'error': 'Missing prompt or messages'}), 400
     
+    # Resolve session ID and isolated directory
+    session_id = request.headers.get('X-Session-ID') or data.get('session_id') or 'default'
+    session_dir = get_session_upload_dir(session_id)
+
+    # Determine active account from pool
+    account = account_pool.get_active_account()
+    acc_id = account.get('id') if account else 'default'
+
     # Handle file references with system prompt
     system_prompt = ""
     if 'files' in data and data['files']:
@@ -581,12 +616,15 @@ def generate():
                 # Check if there's an extracted text version
                 name, ext = os.path.splitext(filename)
                 txt_version = f"{name}.txt"
-                txt_path = os.path.join(UPLOAD_DIR, txt_version)
+                txt_path = os.path.join(session_dir, txt_version)
                 
                 # If extracted text exists, use that
                 if os.path.exists(txt_path):
                     file_list.append(f"{txt_version} (extracted from {filename})")
-                else:
+                elif os.path.exists(os.path.join(session_dir, filename)):
+                    file_list.append(filename)
+                elif os.path.exists(os.path.join(UPLOAD_DIR, filename)):
+                    # Fallback for legacy root uploads
                     file_list.append(filename)
         
         if file_list:
@@ -608,6 +646,7 @@ INSTRUCTIONS:
 - Follow the user's prompt explicitly and completely
 - If you need information from a file, read it directly
 - For PDF files, a text extraction has been provided
+- For image files (PNG, JPG, JPEG, WEBP, GIF), inspect their visual contents directly
 
 """
     
@@ -617,120 +656,161 @@ INSTRUCTIONS:
 
     stream = data.get('stream', False)
     # Add debug logging
-    print(f"Generating with prompt length: {len(prompt)}", flush=True)
+    print(f"[{session_id}][acc:{acc_id}] Generating with prompt length: {len(prompt)} (stream={stream})", flush=True)
     
-    # Set up environment - mimic simple shell
+    # Set up environment
     env = os.environ.copy()
     env['TERM'] = 'dumb' # Force non-interactive
     env['NO_BROWSER'] = 'true'
+    if account and account.get('home_dir'):
+        env['HOME'] = account['home_dir']
 
     if stream:
         def generate_output():
+            process = None
             try:
-                # Use ['gemini'] (REPL) and pipe prompt to stdin
-                # This mimics 'echo "prompt" | gemini' which is proven to work
-                # mocking start.sh behavior.
-                print(f"[STREAM] Starting Gemini subprocess...", flush=True)
+                import json as json_module
+                print(f"[STREAM][{session_id}][acc:{acc_id}] Starting agy subprocess...", flush=True)
                 process = subprocess.Popen(
-                    ['gemini'],
-                    stdin=subprocess.PIPE,
+                    ['agy', '-p', prompt, '--output-format', 'stream-json'],
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT, # Merge stderr
+                    stderr=subprocess.PIPE,
                     text=True,
-                    bufsize=0, # Unbuffered
+                    bufsize=1,  # Line buffered
                     env=env,
-                    cwd=UPLOAD_DIR  # Run in upload dir so files are accessible
+                    cwd=session_dir  # Run in session dir so files are accessible
                 )
                 
-                print(f"[STREAM] Started gemini REPL (pid={process.pid}, prompt_len={len(prompt)}). Writing prompt...", flush=True)
+                print(f"[STREAM][{session_id}][acc:{acc_id}] Started agy (pid={process.pid}). Reading stream...", flush=True)
                 
                 # Send initial heartbeat to client
-                yield "data: [SERVER] Initializing Gemini...\n\n"
+                yield "data: [SERVER] Initializing AI...\n\n"
                 
-                # Write prompt and close stdin to signal EOF
-                try:
-                    process.stdin.write(prompt)
-                    process.stdin.close()
-                    print(f"[STREAM] Prompt written successfully, waiting for response...", flush=True)
-                    yield "data: [SERVER] Prompt sent, waiting for AI response...\n\n"
-                except Exception as e:
-                     print(f"[STREAM] Error writing to stdin: {e}", flush=True)
-                     yield f"data: [ERROR] Failed to send prompt: {e}\n\n"
-                     return
-
-                buffer = ""
-                last_output_time = time.time()
-                chars_received = 0
-                
-                while True:
-                    # Read small chunks for responsive streaming
-                    chunk = process.stdout.read(1)
+                lines_received = 0
+                for line in process.stdout:
+                    line = line.strip()
+                    if not line:
+                        continue
                     
-                    # Send heartbeat every 5 seconds if no output
-                    if not chunk and time.time() - last_output_time > 5:
-                        if process.poll() is None:
-                            print(f"[STREAM] Heartbeat: process alive, {chars_received} chars received", flush=True)
-                            yield "data: [SERVER] Processing... (still working)\n\n"
-                            last_output_time = time.time()
+                    lines_received += 1
+                    try:
+                        event = json_module.loads(line)
+                    except json_module.JSONDecodeError:
+                        cleaned = clean_gemini_output(line, prompt)
+                        if cleaned:
+                            yield f"data: {cleaned}\n\n"
+                        continue
                     
-                    if not chunk and process.poll() is not None:
-                        # Process finished
-                        print(f"[STREAM] Process finished (exit={process.returncode}, chars={chars_received})", flush=True)
-                        # Flush remaining buffer
-                        if buffer:
-                            cleaned_tail = clean_gemini_output(buffer, prompt)
-                            if cleaned_tail:
-                                yield f"data: {cleaned_tail}\n\n"
+                    event_type = event.get('event', '')
+                    if event_type == 'step_update':
+                        step = event.get('step_update', {})
+                        text_delta = step.get('text_delta', '')
+                        if text_delta:
+                            yield f"data: {text_delta}\n\n"
+                    elif event_type == 'result':
+                        result_data = event.get('result', {})
+                        status = result_data.get('status', '')
+                        if status != 'SUCCESS':
+                            error_msg = result_data.get('error', 'Unknown error')
+                            if account and is_quota_error(error_msg):
+                                print(f"[QUOTA][STREAM] Account '{acc_id}' exhausted quota: {error_msg}", flush=True)
+                                account_pool.mark_quota_exhausted(acc_id, error_msg)
+                            yield f"data: [ERROR] {error_msg}\n\n"
+                        else:
+                            if account:
+                                account_pool.record_success(acc_id)
                         yield "data: [DONE]\n\n"
                         break
-                    
-                    if chunk:
-                        chars_received += 1
-                        last_output_time = time.time()
-                        buffer += chunk
-                        # Emit complete lines after cleaning
-                        while "\n" in buffer:
-                            line, buffer = buffer.split("\n", 1)
-                            cleaned_line = clean_gemini_output(line, prompt)
-                            if cleaned_line:
-                                yield f"data: {cleaned_line}\n\n"
                 
-                if process.returncode != 0:
-                     print(f"Process exited with code {process.returncode}", flush=True)
-
+                process.wait()
+                print(f"[STREAM][{session_id}][acc:{acc_id}] Process finished (exit={process.returncode}, lines={lines_received})", flush=True)
+                
+                if lines_received == 0:
+                    stderr_output = process.stderr.read() if process.stderr else ''
+                    print(f"[STREAM][{session_id}][acc:{acc_id}] No output received. stderr: {stderr_output[:500]}", flush=True)
+                    if account and is_quota_error(stderr_output):
+                        print(f"[QUOTA][STREAM] Account '{acc_id}' exhausted quota in stderr.", flush=True)
+                        account_pool.mark_quota_exhausted(acc_id, stderr_output)
+                    yield f"data: [ERROR] No response received from AI\n\n"
+                    yield "data: [DONE]\n\n"
+                
+            except GeneratorExit:
+                print(f"[STREAM][{session_id}][acc:{acc_id}] Client aborted/disconnected.", flush=True)
             except Exception as e:
-                print(f"Exception during generation: {e}", flush=True)
-                yield f"\n[Exception: {str(e)}]"
+                print(f"[STREAM][{session_id}][acc:{acc_id}] Exception during generation: {e}", flush=True)
+                yield f"data: [ERROR] {str(e)}\n\n"
+            finally:
+                if process and process.poll() is None:
+                    print(f"[STREAM][{session_id}][acc:{acc_id}] Terminating active agy process (pid={process.pid})...", flush=True)
+                    try:
+                        process.terminate()
+                        process.wait(timeout=2)
+                    except Exception:
+                        try:
+                            process.kill()
+                        except Exception:
+                            pass
+                    print(f"[STREAM][{session_id}][acc:{acc_id}] Child process terminated cleanly.", flush=True)
 
-        return app.response_class(generate_output(), mimetype='text/plain')
+        resp = app.response_class(generate_output(), mimetype='text/event-stream')
+        resp.headers['Cache-Control'] = 'no-cache, no-transform'
+        resp.headers['X-Accel-Buffering'] = 'no'
+        resp.headers['Connection'] = 'keep-alive'
+        return resp
 
     else:
         try:
-            print(f"[NON-STREAM] Starting subprocess.run (prompt_len={len(prompt)})...", flush=True)
+            print(f"[NON-STREAM][{session_id}][acc:{acc_id}] Starting subprocess.run (prompt_len={len(prompt)})...", flush=True)
             start_time = time.time()
             
             # Run with timeout to detect hanging
             result = subprocess.run(
-                ['gemini', 'chat', prompt],
+                ['agy', '-p', prompt],
                 capture_output=True,
                 text=True,
                 check=False,
                 env=env,
-                cwd=UPLOAD_DIR,  # Run in upload dir so files are accessible
+                cwd=session_dir,  # Run in session dir so files are accessible
+                stdin=subprocess.DEVNULL,
                 timeout=300  # 5 minute timeout
             )
             
             elapsed = time.time() - start_time
             print(f"[NON-STREAM] Subprocess finished in {elapsed:.2f}s. Exit code: {result.returncode}", flush=True)
-            print(f"[NON-STREAM] Output length: {len(result.stdout)} chars", flush=True)
             
             if result.returncode != 0:
-                 print(f"[NON-STREAM] Error output: {result.stderr[:500]}", flush=True)
-                 return jsonify({
-                     'error': 'Gemini CLI failed',
-                     'stderr': result.stderr,
-                     'returncode': result.returncode
-                 }), 500
+                print(f"[NON-STREAM] Error output: {result.stderr[:500]}", flush=True)
+                # Check for quota exhaustion and perform reactive failover
+                if account and is_quota_error(result.stderr):
+                    print(f"[QUOTA] Account '{acc_id}' hit quota limit. Failing over to next account...", flush=True)
+                    next_acc = account_pool.mark_quota_exhausted(acc_id, result.stderr)
+                    if next_acc and next_acc.get('home_dir'):
+                        print(f"[QUOTA] Retrying immediately with account: '{next_acc['id']}'...", flush=True)
+                        retry_env = env.copy()
+                        retry_env['HOME'] = next_acc['home_dir']
+                        result = subprocess.run(
+                            ['agy', '-p', prompt],
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            env=retry_env,
+                            cwd=session_dir,
+                            stdin=subprocess.DEVNULL,
+                            timeout=300
+                        )
+                        if result.returncode == 0:
+                            account_pool.record_success(next_acc['id'])
+                
+                if result.returncode != 0:
+                    return jsonify({
+                        'error': 'AI CLI failed',
+                        'stderr': result.stderr,
+                        'returncode': result.returncode
+                    }), 500
+            else:
+                if account:
+                    account_pool.record_success(acc_id)
                  
             cleaned = clean_gemini_output(result.stdout, prompt)
             print(f"[NON-STREAM] Cleaned output length: {len(cleaned)} chars", flush=True)
@@ -744,4 +824,5 @@ INSTRUCTIONS:
             return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 5055))
+    app.run(host='0.0.0.0', port=port)

@@ -1,143 +1,195 @@
-# File Upload API Examples
+# File & Multimodal Upload API Examples
 
-## Upload Endpoint
+This guide details file upload patterns across text, PDFs, and images with session isolation and prompt references.
 
-### Upload via multipart/form-data
+---
 
+## 1. Upload Patterns
+
+### A. Multipart Upload (Text, PDF, Image)
 ```bash
-curl -X POST http://localhost:5000/api/upload \
-  -F "file=@document.txt"
+curl -X POST http://localhost:5055/api/upload \
+  -H "X-Session-ID: session_abc" \
+  -F "file=@screenshot.png"
 ```
 
 Response:
 ```json
 {
-  "success": true,
-  "filename": "document_a1b2c3d4.txt",
-  "size": 1024,
-  "path": "/home/user/.gemini_uploads/document_a1b2c3d4.txt"
+  "context_mode": false,
+  "extracted_txt": null,
+  "filename": "screenshot_57c32242.png",
+  "path": "/home/user/.gemini_uploads/session_abc/screenshot_57c32242.png",
+  "session_id": "session_abc",
+  "size": 22859,
+  "success": true
 }
 ```
 
-### Upload via JSON with base64
-
+### B. Base64 JSON Upload
 ```bash
-curl -X POST http://localhost:5000/api/upload \
+curl -X POST http://localhost:5055/api/upload \
   -H "Content-Type: application/json" \
+  -H "X-Session-ID: session_abc" \
   -d '{
-    "filename": "data.csv",
-    "file": "'"$(base64 -w 0 data.csv)"'"
+    "filename": "chart.png",
+    "file": "'"$(base64 -w 0 chart.png)"'",
+    "context_mode": false
   }'
 ```
 
-## Generate with Files
+---
 
-### Example 1: Analyze a single file
+## 2. Querying Uploaded Files
 
+### Example 1: Image & Visual Analysis
 ```bash
-# 1. Upload file
-curl -X POST http://localhost:5000/api/upload -F "file=@report.txt"
+# 1. Upload the image
+UPLOAD=$(curl -s -X POST http://localhost:5055/api/upload \
+  -H "X-Session-ID: visual_inspect" \
+  -F "file=@ui_mockup.png")
+IMG_NAME=$(echo $UPLOAD | jq -r '.filename')
 
-# 2. Generate with file reference
-curl -X POST http://localhost:5000/api/generate \
+# 2. Query visual contents
+curl -X POST http://localhost:5055/api/generate \
   -H "Content-Type: application/json" \
+  -H "X-Session-ID: visual_inspect" \
   -d '{
-    "prompt": "Summarize the main points from this report",
-    "files": ["report_a1b2c3d4.txt"],
+    "prompt": "List the UI components, colors, and layout structure in this image.",
+    "files": ["'"$IMG_NAME"'"],
     "stream": false
   }'
 ```
 
-### Example 2: Multiple files
-
+### Example 2: PDF Document Query (Streaming)
 ```bash
-curl -X POST http://localhost:5000/api/generate \
+# 1. Upload PDF (plain-text is automatically extracted)
+UPLOAD=$(curl -s -X POST http://localhost:5055/api/upload \
+  -H "X-Session-ID: doc_reader" \
+  -F "file=@manual.pdf")
+PDF_NAME=$(echo $UPLOAD | jq -r '.filename')
+
+# 2. Query document with real-time SSE stream
+curl -N -X POST http://localhost:5055/api/generate \
   -H "Content-Type: application/json" \
+  -H "X-Session-ID: doc_reader" \
   -d '{
-    "prompt": "Compare the data in both CSV files and identify trends",
-    "files": [
-      {"filename": "sales_2023.csv"},
-      {"filename": "sales_2024.csv"}
-    ],
+    "prompt": "Summarize chapter 3 safety protocols from this manual.",
+    "files": ["'"$PDF_NAME"'"],
     "stream": true
   }'
 ```
 
-### Example 3: Using messages with files
-
+### Example 3: Multiple Files (Comparing Data)
 ```bash
-curl -X POST http://localhost:5000/api/generate \
+curl -X POST http://localhost:5055/api/generate \
   -H "Content-Type: application/json" \
+  -H "X-Session-ID: sales_audit" \
   -d '{
-    "messages": [
-      {"role": "user", "content": "What does this code do?"}
+    "prompt": "Compare Q1 and Q2 sales metrics and report deviations.",
+    "files": [
+      "q1_sales_a1b2c3d4.csv",
+      "q2_sales_e5f6g7h8.csv"
     ],
-    "files": ["script.py"],
     "stream": false
   }'
 ```
 
-## Python Client Example
+---
+
+## 3. Python Integration Example
 
 ```python
 import requests
-import base64
 
-# Upload file
-with open('document.pdf', 'rb') as f:
-    response = requests.post('http://localhost:5000/api/upload', 
-                           files={'file': f})
-    file_info = response.json()
-    print(f"Uploaded: {file_info['filename']}")
+BASE_URL = "http://localhost:5055"
+SESSION_ID = "python_client_session"
 
-# Generate with file
-response = requests.post('http://localhost:5000/api/generate',
-    json={
-        'prompt': 'Extract key information from this document',
-        'files': [file_info['filename']],
-        'stream': False
-    })
+def analyze_image(image_path: str, question: str):
+    # 1. Upload the image
+    with open(image_path, "rb") as f:
+        upload_resp = requests.post(
+            f"{BASE_URL}/api/upload",
+            files={"file": (image_path, f, "image/png")},
+            headers={"X-Session-ID": SESSION_ID}
+        )
+    upload_resp.raise_for_status()
+    filename = upload_resp.json()["filename"]
 
-print(response.json()['response'])
+    # 2. Query visual contents
+    gen_resp = requests.post(
+        f"{BASE_URL}/api/generate",
+        json={
+            "prompt": question,
+            "files": [filename],
+            "stream": False
+        },
+        headers={"X-Session-ID": SESSION_ID}
+    )
+    gen_resp.raise_for_status()
+    return gen_resp.json()["response"]
+
+if __name__ == "__main__":
+    result = analyze_image("diagram.png", "Describe this diagram")
+    print(result)
 ```
 
-## JavaScript Client Example
+---
+
+## 4. JavaScript / Browser Client Example
 
 ```javascript
-// Upload file
-const formData = new FormData();
-formData.append('file', fileInput.files[0]);
+const BASE_URL = "http://localhost:5055";
+const SESSION_ID = "web_session_" + Date.now();
 
-const uploadResponse = await fetch('/api/upload', {
-    method: 'POST',
-    body: formData
-});
-const fileInfo = await uploadResponse.json();
+// 1. Upload File (Image or Document)
+async function uploadFile(fileInput) {
+    const formData = new FormData();
+    formData.append("file", fileInput.files[0]);
 
-// Generate with file
-const generateResponse = await fetch('/api/generate', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({
-        prompt: 'Analyze this file',
-        files: [fileInfo.filename],
-        stream: false
-    })
-});
+    const res = await fetch(`${BASE_URL}/api/upload`, {
+        method: "POST",
+        headers: { "X-Session-ID": SESSION_ID },
+        body: formData
+    });
+    const data = await res.json();
+    return data.filename;
+}
 
-const result = await generateResponse.json();
-console.log(result.response);
+// 2. Query with Streaming & Abort Support
+async function askQuestionWithFile(filename, prompt) {
+    const abortController = new AbortController();
+
+    const res = await fetch(`${BASE_URL}/api/generate`, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "X-Session-ID": SESSION_ID
+        },
+        body: JSON.stringify({
+            prompt: prompt,
+            files: [filename],
+            stream: true
+        }),
+        signal: abortController.signal
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value);
+        console.log("Chunk:", chunk);
+    }
+}
 ```
 
-## How It Works
+---
 
-1. **Upload**: Files are saved to `~/.gemini_uploads/` with unique names (hash-based to prevent collisions)
-2. **Reference**: Include uploaded filenames in the `files` array when calling `/api/generate`
-3. **System Prompt**: The API automatically prepends instructions telling the AI to read the specified files
-4. **Working Directory**: Gemini CLI runs with `~/.gemini_uploads/` as the working directory, so it can access the files
+## 5. Storage & Isolation Architecture
 
-## File Naming
-
-- Original filename: `document.txt`
-- Stored as: `document_a1b2c3d4.txt` (hash suffix prevents collisions)
-- Use the returned `filename` from the upload response in subsequent generate calls
+1. **Storage Path:** Uploaded files are saved to `~/.gemini_uploads/<session_id>/<filename>`.
+2. **File Naming:** Files are renamed to `<basename>_<hash8>.<ext>` to avoid namespace collisions.
+3. **Execution Sandbox:** The `agy` subprocess runs with `cwd` set to `~/.gemini_uploads/<session_id>/`, providing read-only access to uploaded assets.

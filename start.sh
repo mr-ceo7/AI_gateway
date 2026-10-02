@@ -8,7 +8,7 @@ echo "Starting AI Gateway..."
 # but the user asked to trigger auth.
 
 echo "----------------------------------------------------------------"
-echo "Initializing Gemini CLI Authentication..."
+echo "Initializing AGY CLI Authentication..."
 echo "Please check the logs below for an authentication URL."
 echo "Copy and paste it into your browser to authorize."
 echo "----------------------------------------------------------------"
@@ -22,12 +22,12 @@ if [ -z "$GEMINI_API_KEY" ]; then
 fi
 
 # Check for credentials using credential inspection (not CLI probing)
-echo "Checking for Gemini CLI credentials..."
+echo "Checking for AGY CLI credentials..."
 if [ -f ~/.gemini/oauth_creds.json ]; then
     echo "✓ Found OAuth credentials at ~/.gemini/oauth_creds.json"
     CREDS_FOUND=true
 elif [ -f ~/.gemini/settings.json ] && [ -f ~/.gemini/google_accounts.json ]; then
-    echo "✓ Found Gemini CLI settings and active account"
+    echo "✓ Found AGY CLI settings and active account"
     CREDS_FOUND=true
 else
     echo "⚠ No credentials found. Auth UI will be available on startup."

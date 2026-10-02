@@ -24,14 +24,18 @@ class Config:
     )
     MAX_FILE_SIZE: int = int(os.getenv('MAX_FILE_SIZE', str(50 * 1024 * 1024)))  # 50MB
     ALLOWED_EXTENSIONS: Set[str] = set(
-        os.getenv('ALLOWED_EXTENSIONS', '.txt,.pdf,.md,.csv,.json').split(',')
+        os.getenv('ALLOWED_EXTENSIONS', '.txt,.pdf,.md,.csv,.json,.png,.jpg,.jpeg,.webp,.gif').split(',')
     )
     ALLOWED_MIME_TYPES: Set[str] = {
         'text/plain',
         'application/pdf',
         'text/markdown',
         'text/csv',
-        'application/json'
+        'application/json',
+        'image/png',
+        'image/jpeg',
+        'image/webp',
+        'image/gif'
     }
     FILE_CLEANUP_INTERVAL: int = int(os.getenv('FILE_CLEANUP_INTERVAL', '3600'))  # 1 hour
     

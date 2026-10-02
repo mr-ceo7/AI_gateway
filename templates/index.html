@@ -368,13 +368,52 @@
         }
 
         /* Markdown Styles */
-        .message.ai pre {
-            background: #1a1a1a;
-            padding: 10px;
+        .code-block-wrapper {
+            background: #18191A;
+            border: 1px solid rgba(255, 255, 255, 0.1);
             border-radius: 8px;
+            margin: 12px 0;
+            overflow: hidden;
+        }
+
+        .code-block-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 12px;
+            background: #121314;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            font-size: 10px;
+            font-family: monospace;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--text-secondary);
+        }
+
+        .copy-code-btn {
+            background: transparent;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            color: var(--text-primary);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-family: monospace;
+            letter-spacing: 0.08em;
+            cursor: pointer;
+            transition: background 0.15s, border-color 0.15s;
+        }
+
+        .copy-code-btn:hover {
+            background: rgba(255, 255, 255, 0.08);
+            border-color: rgba(255, 255, 255, 0.3);
+        }
+
+        .message.ai pre {
+            background: transparent;
+            padding: 12px;
+            margin: 0;
             overflow-x: auto;
-            margin: 10px 0;
-            border: 1px solid #333;
+            border: none;
         }
 
         .message.ai code {
@@ -600,9 +639,12 @@
                 </button>
                 <textarea id="user-input" placeholder="Ask Galvaniy" rows="1" oninput="autoResize(this)"
                     onkeydown="handleEnter(event)"></textarea>
-                <button class="tool-btn" onclick="sendMessage()" style="color: white;">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                <button class="tool-btn" id="send-btn" onclick="handleSendOrStop()" style="color: white;" title="Send">
+                    <svg id="send-icon" width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
                         <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"></path>
+                    </svg>
+                    <svg id="stop-icon" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" style="display: none;">
+                        <rect x="5" y="5" width="14" height="14" rx="2"></rect>
                     </svg>
                 </button>
                 <input type="file" id="file-input" style="display: none;" multiple onchange="handleFileSelect(event)">
@@ -652,13 +694,32 @@
         let history = JSON.parse(localStorage.getItem('chatHistory')) || {};
         let uploadedFiles = [];
 
-        // Markdown Configuration
-        marked.setOptions({
-            highlight: function (code, lang) {
-                const language = hljs.getLanguage(lang) ? lang : 'plaintext';
-                return hljs.highlight(code, { language }).value;
-            }
-        });
+        // Markdown Configuration with Code Copy Support
+        const customRenderer = new marked.Renderer();
+        customRenderer.code = function (code, lang) {
+            const validLang = !!(lang && hljs.getLanguage(lang));
+            const highlighted = validLang ? hljs.highlight(code, { language: lang }).value : hljs.highlightAuto(code).value;
+            const langLabel = (lang || 'code').toUpperCase();
+            const encoded = encodeURIComponent(code);
+            return `
+            <div class="code-block-wrapper">
+                <div class="code-block-header">
+                    <span>${langLabel}</span>
+                    <button class="copy-code-btn" data-code="${encoded}" onclick="copyCode(this)">COPY</button>
+                </div>
+                <pre><code class="hljs ${lang || ''}">${highlighted}</code></pre>
+            </div>`;
+        };
+        marked.setOptions({ renderer: customRenderer });
+
+        function copyCode(btn) {
+            const code = decodeURIComponent(btn.getAttribute('data-code'));
+            navigator.clipboard.writeText(code).then(() => {
+                const prev = btn.innerText;
+                btn.innerText = 'COPIED';
+                setTimeout(() => { btn.innerText = prev; }, 1800);
+            }).catch(e => console.error("Clipboard copy failed", e));
+        }
 
         // --- File Handling ---
         function handleFileSelect(event) {
@@ -670,7 +731,11 @@
                 const formData = new FormData();
                 formData.append('file', file);
                 try {
-                    const res = await fetch('/api/upload', { method: 'POST', body: formData });
+                    const res = await fetch('/api/upload', {
+                        method: 'POST',
+                        headers: { 'X-Session-ID': currentChatId },
+                        body: formData
+                    });
                     if (res.ok) {
                         const data = await res.json();
                         uploadedFiles.push({ filename: data.filename, originalName: file.name });
@@ -731,7 +796,14 @@
         }
 
         function startNewChat() {
+            if (currentAbortController) {
+                currentAbortController.abort();
+                currentAbortController = null;
+                setGeneratingState(false);
+            }
             currentChatId = Date.now().toString();
+            uploadedFiles = [];
+            renderFileChips();
             document.getElementById('chat-container').innerHTML = renderWelcomeScreen();
             renderHistoryList();
             if (window.innerWidth < 768) toggleSidebar();
@@ -783,6 +855,33 @@
             container.scrollTop = container.scrollHeight;
         }
 
+        let currentAbortController = null;
+
+        function setGeneratingState(isGenerating) {
+            const sendIcon = document.getElementById('send-icon');
+            const stopIcon = document.getElementById('stop-icon');
+            const sendBtn = document.getElementById('send-btn');
+            if (isGenerating) {
+                if (sendIcon) sendIcon.style.display = 'none';
+                if (stopIcon) stopIcon.style.display = 'block';
+                if (sendBtn) sendBtn.title = 'Stop Generating';
+            } else {
+                if (sendIcon) sendIcon.style.display = 'block';
+                if (stopIcon) stopIcon.style.display = 'none';
+                if (sendBtn) sendBtn.title = 'Send';
+            }
+        }
+
+        function handleSendOrStop() {
+            if (currentAbortController) {
+                currentAbortController.abort();
+                currentAbortController = null;
+                setGeneratingState(false);
+            } else {
+                sendMessage();
+            }
+        }
+
         async function sendMessage() {
             const input = document.getElementById('user-input');
             const text = input.value.trim();
@@ -807,18 +906,25 @@
             container.appendChild(aiDiv);
 
             let fullResponse = "";
+            currentAbortController = new AbortController();
+            setGeneratingState(true);
 
             try {
                 const payload = {
                     messages: history[currentChatId].messages,
                     stream: true,
-                    files: uploadedFiles.map(f => f.filename)
+                    files: uploadedFiles.map(f => f.filename),
+                    session_id: currentChatId
                 };
 
                 const res = await fetch('/api/generate', {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Session-ID': currentChatId
+                    },
+                    body: JSON.stringify(payload),
+                    signal: currentAbortController.signal
                 });
 
                 loading.style.display = 'none';
@@ -837,7 +943,7 @@
                     const lines = chunk.split('\n');
                     const filteredChunk = lines
                         .filter(line => !line.includes('[SERVER]') && !line.includes('[DONE]'))
-                        .map(line => line.replace(/^data:\s*/, ''))  // Remove "data: " prefix
+                        .map(line => line.replace(/^data:\s*/, ''))
                         .join('\n');
 
                     fullResponse += filteredChunk;
@@ -852,7 +958,19 @@
 
             } catch (e) {
                 loading.style.display = 'none';
-                aiDiv.innerHTML = `<span style="color:#ff6b6b">Error: ${e.message}</span>`;
+                if (e.name === 'AbortError') {
+                    if (fullResponse) {
+                        history[currentChatId].messages.push({ role: 'ai', content: fullResponse });
+                        saveHistory();
+                    }
+                    aiDiv.innerHTML = marked.parse(fullResponse + '\n\n*(Generation stopped)*');
+                } else {
+                    aiDiv.innerHTML = `<span style="color:#ff6b6b">Error: ${e.message}</span>`;
+                }
+            } finally {
+                loading.style.display = 'none';
+                currentAbortController = null;
+                setGeneratingState(false);
             }
         }
 

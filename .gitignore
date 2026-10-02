@@ -1,0 +1,62 @@
+# Environment and Secret Files
+.env
+.env.*
+*.env
+!.env.example
+*.pem
+*.key
+*.pkcs12
+*.pfx
+secrets/
+credentials/
+oauth_creds.json
+antigravity-oauth-token
+google_accounts.json
+
+# Multi-Account Local Pools and Uploads
+.gemini_accounts/
+.gemini_uploads/
+.gemini/
+accounts_pool.tar.gz
+*.tar.gz
+
+# Python Bytecode and Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Logs and Databases
+*.log
+server.log
+*.sqlite
+*.sqlite3
+*.db
+
+# Temporary and Test Artifacts
+*.tmp
+*.bak
+*.swp
+*~
+headless_test_screenshot.png
+improvements_screenshot.png
+puppeteer_test_screenshot.png
+test_screenshots/
+*.png
+
+# IDE & OS Metadata
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
