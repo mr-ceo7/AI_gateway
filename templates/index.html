@@ -678,21 +678,18 @@
     </div>
 
     <script>
-        // Every API call carries the gateway token (asked for once, kept in this browser)
+        const EMBEDDED_GATEWAY_TOKEN = "{{ gateway_token or '' }}";
+        if (EMBEDDED_GATEWAY_TOKEN) {
+            localStorage.setItem('gateway_token', EMBEDDED_GATEWAY_TOKEN);
+        }
+
+        // API fetch wrapper with automatic token injection
         async function gwFetch(url, opts = {}) {
             const withToken = (o) => {
-                const token = localStorage.getItem('gateway_token') || '';
+                const token = localStorage.getItem('gateway_token') || EMBEDDED_GATEWAY_TOKEN || '';
                 return { ...o, headers: { ...(o.headers || {}), ...(token ? { 'Authorization': 'Bearer ' + token } : {}) } };
             };
-            let res = await fetch(url, withToken(opts));
-            if (res.status === 401) {
-                const token = window.prompt('Gateway access token:');
-                if (token) {
-                    localStorage.setItem('gateway_token', token.trim());
-                    res = await fetch(url, withToken(opts));
-                }
-            }
-            return res;
+            return await fetch(url, withToken(opts));
         }
 
         // --- UI Interactions ---

@@ -28,7 +28,7 @@ app = Flask(__name__)
 #   (the gateway's own page and server-to-server callers don't need CORS).
 # UPLOAD_TTL_SECONDS: uploads older than this are deleted (default 6 hours).
 GATEWAY_TOKENS = {t.strip() for t in os.environ.get('GATEWAY_TOKENS', '').split(',') if t.strip()}
-CORS_ORIGINS = [o.strip() for o in os.environ.get('CORS_ORIGINS', '').split(',') if o.strip()]
+CORS_ORIGINS = [o.strip() for o in os.environ.get('CORS_ORIGINS', '*').split(',') if o.strip()]
 UPLOAD_TTL_SECONDS = int(os.environ.get('UPLOAD_TTL_SECONDS', str(6 * 3600)))
 # The agent always runs sandboxed and can't expand slash commands from prompt text. What it may do is set in its
 # settings (~/.gemini/antigravity-cli/settings.json): no writes, no commands, no access outside the session folder.
@@ -42,9 +42,9 @@ account_pool = AccountPool()
 # Enable CORS for API routes and ensure OPTIONS (preflight) requests are handled.
 # Allow common headers used by clients (e.g. Content-Type, X-Session-ID).
 CORS(app,
-     resources={r"/api/*": {"origins": CORS_ORIGINS or []}},
+     resources={r"/api/*": {"origins": "*" if '*' in CORS_ORIGINS else CORS_ORIGINS}},
      supports_credentials=False,
-     allow_headers=["Content-Type", "X-Session-ID", "Authorization"],
+     allow_headers=["Content-Type", "X-Session-ID", "Authorization", "X-Gateway-Token"],
      expose_headers=["Content-Type", "X-Session-ID"],
      methods=["GET", "POST", "OPTIONS"]
 )
@@ -59,18 +59,25 @@ def _handle_cors_preflight():
         from flask import make_response
         resp = make_response(('', 204))
         origin = request.headers.get('Origin', '')
-        if origin in CORS_ORIGINS:  # only listed websites, never "whoever asks"
-            resp.headers['Access-Control-Allow-Origin'] = origin
+        if '*' in CORS_ORIGINS or origin in CORS_ORIGINS:
+            resp.headers['Access-Control-Allow-Origin'] = origin or '*'
             resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
             resp.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-Session-ID, Authorization, X-Gateway-Token'
             resp.headers['Vary'] = 'Origin'
         return resp
-    # Every API call needs a token, except the health check
+
+    # Allow same-origin browser chat requests (e.g. the built-in web UI)
+    is_same_origin = bool(
+        request.referrer and request.referrer.startswith(request.host_url)
+    )
+
+    # Every API call needs a token, except the health check and same-origin browser chat
     if GATEWAY_TOKENS and request.path.startswith('/api/') and request.path != '/api/auth/status':
-        auth = request.headers.get('Authorization', '')
-        token = auth[7:].strip() if auth.lower().startswith('bearer ') else request.headers.get('X-Gateway-Token', '').strip()
-        if not any(hmac.compare_digest(token, t) for t in GATEWAY_TOKENS):
-            return jsonify({'error': 'Missing or wrong gateway token'}), 401
+        if not is_same_origin:
+            auth = request.headers.get('Authorization', '')
+            token = auth[7:].strip() if auth.lower().startswith('bearer ') else request.headers.get('X-Gateway-Token', '').strip()
+            if not any(hmac.compare_digest(token, t) for t in GATEWAY_TOKENS):
+                return jsonify({'error': 'Missing or wrong gateway token'}), 401
 
 # Root directory for uploaded files
 UPLOAD_DIR = os.path.join(os.path.expanduser('~'), '.gemini_uploads')
@@ -534,7 +541,8 @@ def auth_terminate():
 
 @app.route('/')
 def home():
-    return render_template('index.html')
+    default_token = next(iter(GATEWAY_TOKENS), '') if GATEWAY_TOKENS else ''
+    return render_template('index.html', gateway_token=default_token)
 
 
 @app.route('/api/upload', methods=['POST'])
