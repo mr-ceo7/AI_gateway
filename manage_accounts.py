@@ -249,14 +249,16 @@ def cmd_sync_to_prod(args):
         sys.exit(1)
 
     # 1. Sync updated gateway code files
-    print("Uploading code updates (app.py, utils/account_pool.py, manage_accounts.py)...")
+    print("Uploading code updates (app.py, utils/account_pool.py, manage_accounts.py, templates/index.html)...")
     app_py = os.path.join(base_dir, "app.py")
     acc_pool_py = os.path.join(base_dir, "utils", "account_pool.py")
     manage_py = os.path.join(base_dir, "manage_accounts.py")
+    index_html = os.path.join(base_dir, "templates", "index.html")
 
     subprocess.run(f"{prod_scp} {app_py} {remote_target}:/var/www/ai-gateway/app.py", shell=True, check=True)
     subprocess.run(f"{prod_scp} {acc_pool_py} {remote_target}:/var/www/ai-gateway/utils/account_pool.py", shell=True, check=True)
     subprocess.run(f"{prod_scp} {manage_py} {remote_target}:/var/www/ai-gateway/manage_accounts.py", shell=True, check=True)
+    subprocess.run(f"{prod_scp} {index_html} {remote_target}:/var/www/ai-gateway/templates/index.html", shell=True, check=True)
 
     # 2. Tar the accounts directory
     tar_path = "/tmp/accounts_pool.tar.gz"
@@ -283,7 +285,7 @@ def cmd_sync_to_prod(args):
         "rm -f /tmp/accounts_pool.tar.gz && "
         "systemctl restart ai-gateway.service && "
         "sleep 2 && "
-        "curl -s http://127.0.0.1:5055/api/accounts"
+        "curl -s -H 'Referer: http://127.0.0.1:5055/' http://127.0.0.1:5055/api/accounts"
     )
     res = subprocess.run(f'{prod_ssh} "{remote_cmd}"', shell=True, capture_output=True, text=True)
     os.remove(tar_path)

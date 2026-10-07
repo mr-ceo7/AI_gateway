@@ -1,5 +1,7 @@
-flask
-gunicorn
-gevent
-PyPDF2
-flask-cors
+flask>=3.0.0
+flask-cors>=4.0.0
+gunicorn>=21.2.0
+gevent>=24.2.1
+python-dotenv>=1.0.0
+PyPDF2>=3.0.0
+werkzeug>=3.0.0

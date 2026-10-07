@@ -206,26 +206,34 @@ python manage_accounts.py sync-to-prod
 
 ---
 
-## Quickstart
+## Quickstart & Installation
 
-### Prerequisites
-* Python 3.9+
-* Google `agy` CLI installed (`which agy`) and authenticated (`~/.gemini/` credentials)
+### 1. Automated Installation
+Run the installer script to set up the virtual environment, compile dependencies, configure tokens, and register a systemd user daemon:
 
-### 1. Install Dependencies
 ```bash
-pip install -r requirements.txt
+./install.sh
 ```
 
-### 2. Start the Server
+### 2. Service Management
 ```bash
-# Uses default port 5055 (or override via PORT=...)
-python app.py
+# Start background service
+systemctl --user start ai-gateway
+
+# Check service status and logs
+systemctl --user status ai-gateway
+journalctl --user -u ai-gateway -f
+
+# Enable auto-start on boot
+systemctl --user enable ai-gateway
+
+# Or run manually in foreground
+ai-gateway
 ```
 
 ### 3. Verify Health
 ```bash
-curl http://localhost:5055/api/auth/status
+curl http://localhost:5000/api/auth/status
 ```
 
 ---

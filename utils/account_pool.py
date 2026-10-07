@@ -281,3 +281,53 @@ def is_quota_error(text: str) -> bool:
     ]
     low = text.lower()
     return any(re.search(p, low) for p in patterns)
+
+def ensure_account_symlinks(account_home: str):
+    """
+    Guarantees global configs, SSH keys, skills, plugins, and unified conversations
+    are accessible inside the isolated account home without token contamination.
+    """
+    real_home = os.path.expanduser("~")
+    if not account_home or account_home == real_home:
+        return
+
+    # 1. Global tools and configurations
+    for item in [".gitconfig", ".ssh"]:
+        src = os.path.join(real_home, item)
+        dst = os.path.join(account_home, item)
+        if os.path.exists(src) and not os.path.exists(dst) and not os.path.islink(dst):
+            try:
+                os.symlink(src, dst)
+            except Exception:
+                pass
+
+    # 2. Shared plugins, skills, and prompts
+    gem_src = os.path.join(real_home, ".gemini", "config")
+    gem_dst = os.path.join(account_home, ".gemini", "config")
+    if os.path.exists(gem_src) and not os.path.exists(gem_dst) and not os.path.islink(gem_dst):
+        try:
+            os.symlink(gem_src, gem_dst)
+        except Exception:
+            pass
+
+    # 3. Unified conversation history, transcripts, and command line cache
+    central_cli = os.path.join(real_home, ".gemini", "antigravity-cli")
+    acc_cli = os.path.join(account_home, ".gemini", "antigravity-cli")
+    os.makedirs(acc_cli, exist_ok=True)
+
+    shared_items = ["brain", "conversations", "conversation_summaries.db", "history.jsonl", "cache"]
+    for item in shared_items:
+        src = os.path.join(central_cli, item)
+        dst = os.path.join(acc_cli, item)
+
+        if not os.path.exists(src):
+            if "." in item:
+                open(src, "w").close()
+            else:
+                os.makedirs(src, exist_ok=True)
+
+        if not os.path.exists(dst) and not os.path.islink(dst):
+            try:
+                os.symlink(src, dst)
+            except Exception:
+                pass

@@ -39,6 +39,22 @@ echo "Starting Web Server with Auth UI..."
 echo "----------------------------------------------------------------"
 
 
+# Activate virtual environment if present
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+if [ -f "${SCRIPT_DIR}/venv/bin/activate" ]; then
+    source "${SCRIPT_DIR}/venv/bin/activate"
+fi
+
+# Load .env if present
+if [ -f "${SCRIPT_DIR}/.env" ]; then
+    set -a
+    source "${SCRIPT_DIR}/.env"
+    set +a
+fi
+
+PORT="${PORT:-5000}"
+HOST="${HOST:-0.0.0.0}"
+
 # Start the server
 # Use sync worker with timeout 0 to disable for long-running streaming requests
-exec gunicorn --bind 0.0.0.0:$PORT --timeout 0 app:app
+exec gunicorn --bind "${HOST}:${PORT}" --timeout 0 app:app

@@ -187,9 +187,12 @@
         /* Messages */
         .message {
             max-width: 85%;
-            line-height: 1.6;
+            line-height: 1.65;
             font-size: 1rem;
             position: relative;
+            overflow-wrap: break-word;
+            word-wrap: break-word;
+            word-break: normal;
         }
 
         .message.user {
@@ -198,6 +201,7 @@
             color: var(--text-primary);
             padding: 12px 20px;
             border-radius: 20px 20px 4px 20px;
+            white-space: pre-wrap;
         }
 
         .message.ai {
@@ -209,7 +213,19 @@
 
         .message.ai img {
             max-width: 100%;
+            height: auto;
             border-radius: 12px;
+            margin: 14px 0;
+            display: block;
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+            cursor: pointer;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .message.ai img:hover {
+            transform: scale(1.01);
+            box-shadow: 0 12px 36px rgba(0, 0, 0, 0.6);
         }
 
         /* Welcome Screen */
@@ -421,7 +437,31 @@
         }
 
         .message.ai p {
-            margin-bottom: 10px;
+            margin-bottom: 12px;
+            line-height: 1.65;
+        }
+
+        .message.ai p:last-child {
+            margin-bottom: 0;
+        }
+
+        .message.ai ul, .message.ai ol {
+            margin: 10px 0 14px 0;
+            padding-left: 24px;
+        }
+
+        .message.ai li {
+            margin-bottom: 6px;
+            line-height: 1.6;
+        }
+
+        .message.ai li:last-child {
+            margin-bottom: 0;
+        }
+
+        .message.ai strong {
+            color: #FFFFFF;
+            font-weight: 600;
         }
 
         /* Splash Screen */
@@ -678,6 +718,20 @@
     </div>
 
     <script>
+        const EMBEDDED_GATEWAY_TOKEN = "{{ gateway_token or '' }}";
+        if (EMBEDDED_GATEWAY_TOKEN) {
+            localStorage.setItem('gateway_token', EMBEDDED_GATEWAY_TOKEN);
+        }
+
+        // API fetch wrapper with automatic token injection
+        async function gwFetch(url, opts = {}) {
+            const withToken = (o) => {
+                const token = localStorage.getItem('gateway_token') || EMBEDDED_GATEWAY_TOKEN || '';
+                return { ...o, headers: { ...(o.headers || {}), ...(token ? { 'Authorization': 'Bearer ' + token } : {}) } };
+            };
+            return await fetch(url, withToken(opts));
+        }
+
         // --- UI Interactions ---
         function toggleSidebar() {
             document.getElementById('sidebar').classList.toggle('active');
@@ -710,7 +764,17 @@
                 <pre><code class="hljs ${lang || ''}">${highlighted}</code></pre>
             </div>`;
         };
-        marked.setOptions({ renderer: customRenderer });
+
+        customRenderer.image = function (href, title, text) {
+            const token = localStorage.getItem('gateway_token') || EMBEDDED_GATEWAY_TOKEN || '';
+            let finalHref = href;
+            if (token && href && href.startsWith('/api/artifacts/')) {
+                const sep = href.includes('?') ? '&' : '?';
+                finalHref = `${href}${sep}token=${encodeURIComponent(token)}`;
+            }
+            return `<img src="${finalHref}" alt="${text || ''}" title="${title || text || ''}" loading="lazy" style="cursor: pointer;" onclick="window.open('${finalHref}', '_blank')">`;
+        };
+        marked.setOptions({ renderer: customRenderer, breaks: false, gfm: true });
 
         function copyCode(btn) {
             const code = decodeURIComponent(btn.getAttribute('data-code'));
@@ -731,7 +795,7 @@
                 const formData = new FormData();
                 formData.append('file', file);
                 try {
-                    const res = await fetch('/api/upload', {
+                    const res = await gwFetch('/api/upload', {
                         method: 'POST',
                         headers: { 'X-Session-ID': currentChatId },
                         body: formData
@@ -917,7 +981,7 @@
                     session_id: currentChatId
                 };
 
-                const res = await fetch('/api/generate', {
+                const res = await gwFetch('/api/generate', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -933,22 +997,80 @@
 
                 const reader = res.body.getReader();
                 const decoder = new TextDecoder();
+                let sseBuffer = '';
 
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done) break;
-                    const chunk = decoder.decode(value, { stream: true });
+                    sseBuffer += decoder.decode(value, { stream: true });
 
-                    // Filter out server messages and control markers, and remove "data: " prefix
-                    const lines = chunk.split('\n');
-                    const filteredChunk = lines
-                        .filter(line => !line.includes('[SERVER]') && !line.includes('[DONE]'))
-                        .map(line => line.replace(/^data:\s*/, ''))
-                        .join('\n');
+                    let boundaryIndex;
+                    while ((boundaryIndex = sseBuffer.indexOf('\n\n')) !== -1) {
+                        const eventBlock = sseBuffer.slice(0, boundaryIndex);
+                        sseBuffer = sseBuffer.slice(boundaryIndex + 2);
 
-                    fullResponse += filteredChunk;
-                    aiDiv.innerHTML = marked.parse(fullResponse);
-                    container.scrollTop = container.scrollHeight;
+                        if (!eventBlock.trim()) continue;
+
+                        const lines = eventBlock.split('\n');
+                        const dataLines = [];
+                        let isServerMsg = false;
+                        let isDone = false;
+                        let isError = false;
+                        let errorMsg = '';
+
+                        for (const rawLine of lines) {
+                            if (rawLine.startsWith('data:')) {
+                                const payload = rawLine.startsWith('data: ') ? rawLine.slice(6) : rawLine.slice(5);
+
+                                if (payload === '[DONE]') {
+                                    isDone = true;
+                                    break;
+                                } else if (payload.startsWith('[SERVER]')) {
+                                    isServerMsg = true;
+                                    break;
+                                } else if (payload.startsWith('[ERROR]')) {
+                                    isError = true;
+                                    errorMsg = payload.slice(7).trim();
+                                    break;
+                                } else {
+                                    dataLines.push(payload);
+                                }
+                            }
+                        }
+
+                        if (isDone) break;
+                        if (isServerMsg) continue;
+                        if (isError) {
+                            throw new Error(errorMsg || 'Generation failed');
+                        }
+
+                        if (dataLines.length > 0) {
+                            const eventText = dataLines.join('\n');
+                            fullResponse += eventText;
+                            aiDiv.innerHTML = marked.parse(fullResponse);
+                            container.scrollTop = container.scrollHeight;
+                        }
+                    }
+                }
+
+                // Process any trailing buffer after stream closes
+                sseBuffer += decoder.decode();
+                if (sseBuffer.trim()) {
+                    const lines = sseBuffer.split('\n');
+                    const dataLines = [];
+                    for (const rawLine of lines) {
+                        if (rawLine.startsWith('data:')) {
+                            const payload = rawLine.startsWith('data: ') ? rawLine.slice(6) : rawLine.slice(5);
+                            if (payload !== '[DONE]' && !payload.startsWith('[SERVER]') && !payload.startsWith('[ERROR]')) {
+                                dataLines.push(payload);
+                            }
+                        }
+                    }
+                    if (dataLines.length > 0) {
+                        fullResponse += dataLines.join('\n');
+                        aiDiv.innerHTML = marked.parse(fullResponse);
+                        container.scrollTop = container.scrollHeight;
+                    }
                 }
 
                 history[currentChatId].messages.push({ role: 'ai', content: fullResponse });
@@ -990,7 +1112,7 @@
         async function checkAuthStatus() {
             console.log("Checking auth status...");
             try {
-                const res = await fetch('/api/auth/status');
+                const res = await gwFetch('/api/auth/status');
                 console.log("Auth status response received:", res.status);
                 const data = await res.json();
 
@@ -1012,7 +1134,7 @@
 
             const interval = setInterval(async () => {
                 try {
-                    const res = await fetch('/api/auth/url');
+                    const res = await gwFetch('/api/auth/url');
                     const data = await res.json();
 
                     if (data.url) {
@@ -1032,7 +1154,7 @@
             const errorMsg = document.getElementById('auth-error');
 
             try {
-                const res = await fetch('/api/auth/submit', {
+                const res = await gwFetch('/api/auth/submit', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ code })
@@ -1054,7 +1176,7 @@
         async function pollForAuthSuccess() {
             const interval = setInterval(async () => {
                 try {
-                    const res = await fetch('/api/auth/status');
+                    const res = await gwFetch('/api/auth/status');
                     const data = await res.json();
                     if (data.authenticated) {
                         clearInterval(interval);
@@ -1065,7 +1187,7 @@
         }
 
         async function forceCompleteAuth() {
-            await fetch('/api/auth/terminate', { method: 'POST' });
+            await gwFetch('/api/auth/terminate', { method: 'POST' });
             location.reload();
         }
 

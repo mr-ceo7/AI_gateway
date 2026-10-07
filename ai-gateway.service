@@ -1,0 +1,15 @@
+[Unit]
+Description=AI Gateway Daemon
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/AI_gateway
+EnvironmentFile=-%h/AI_gateway/.env
+Environment="PATH=%h/AI_gateway/venv/bin:%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=%h/AI_gateway/venv/bin/gunicorn --bind 0.0.0.0:5000 --timeout 0 app:app
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
