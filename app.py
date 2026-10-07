@@ -13,7 +13,13 @@ import hashlib
 import hmac
 import json
 from werkzeug.utils import secure_filename
-from utils.account_pool import AccountPool, is_quota_error
+from utils.account_pool import AccountPool, is_quota_error, ensure_account_symlinks
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 try:
     import PyPDF2
     HAS_PYPDF2 = True
@@ -170,15 +176,26 @@ def extract_pdf_to_text(pdf_path, output_path):
     return None
 
 def json_answer(stdout):
-    """(answer, denied actions) from agy's --output-format json output, or (None, []) if it isn't JSON."""
+    """(answer, denied actions) from CLI json output across agy, claude, or copilot."""
     for line in reversed((stdout or '').strip().splitlines()):
         try:
             data = json.loads(line)
         except ValueError:
             continue
-        result = data.get('result', data) if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            continue
+        # Claude style: {"type":"result", "result": "answer text"}
+        if data.get('type') == 'result' and isinstance(data.get('result'), str):
+            return data.get('result'), []
+        # agy style: {"result": {"response": "answer text", "status": "SUCCESS", "denied_actions": [...]}}
+        result = data.get('result', data)
         if isinstance(result, dict) and ('response' in result or 'status' in result):
             return (result.get('response') or ''), [d.get('action') for d in (result.get('denied_actions') or [])]
+        # Copilot or generic message style: {"content": "..."} or {"response": "..."}
+        if 'content' in data and isinstance(data['content'], str):
+            return data['content'], []
+        if 'response' in data and isinstance(data['response'], str):
+            return data['response'], []
     return None, []
 
 
@@ -897,21 +914,44 @@ INSTRUCTIONS:
     # Add debug logging
     print(f"[{session_id}][acc:{acc_id}] Generating with prompt length: {len(prompt)} (stream={stream})", flush=True)
     
-    # Set up environment
+    # Determine backend CLI (default: agy)
+    backend = (data.get('backend') or os.getenv('DEFAULT_BACKEND', 'agy')).lower()
+
+    # Set up isolated execution environment
     env = os.environ.copy()
     env['TERM'] = 'dumb' # Force non-interactive
     env['NO_BROWSER'] = 'true'
-    if account and account.get('home_dir'):
-        env['HOME'] = account['home_dir']
+    env['DBUS_SESSION_BUS_ADDRESS'] = 'disabled'
+    env.pop('SSH_CONNECTION', None)
+    env.pop('SSH_CLIENT', None)
+    env.pop('SSH_TTY', None)
+
+    if backend in ('claude', 'claude2'):
+        claude_bin = 'claude2' if (backend == 'claude2' or shutil.which('claude2')) else 'claude'
+        if stream:
+            cli_cmd = [claude_bin, '-p', prompt, '--output-format', 'stream-json', '--verbose']
+        else:
+            cli_cmd = [claude_bin, '-p', prompt, '--output-format', 'json']
+    elif backend in ('copilot', 'github-copilot'):
+        cli_cmd = ['copilot', '-p', prompt, '--output-format', 'json']
+    else:
+        # Default: agy
+        if account and account.get('home_dir'):
+            env['HOME'] = account['home_dir']
+            ensure_account_symlinks(account['home_dir'])
+        if stream:
+            cli_cmd = ['agy', '-p', prompt, '--output-format', 'stream-json', *AGY_FLAGS, *extra_args]
+        else:
+            cli_cmd = ['agy', '-p', prompt, '--output-format', 'json', *AGY_FLAGS, *extra_args]
 
     if stream:
         def generate_output():
             process = None
             try:
                 import json as json_module
-                print(f"[STREAM][{session_id}][acc:{acc_id}] Starting agy subprocess...", flush=True)
+                print(f"[STREAM][{session_id}][backend:{backend}][acc:{acc_id}] Starting subprocess: {cli_cmd[0]}...", flush=True)
                 process = subprocess.Popen(
-                    ['agy', '-p', prompt, '--output-format', 'stream-json', *AGY_FLAGS, *extra_args],
+                    cli_cmd,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -921,7 +961,7 @@ INSTRUCTIONS:
                     cwd=session_dir  # Run in session dir so files are accessible
                 )
                 
-                print(f"[STREAM][{session_id}][acc:{acc_id}] Started agy (pid={process.pid}). Reading stream...", flush=True)
+                print(f"[STREAM][{session_id}][backend:{backend}][acc:{acc_id}] Started {cli_cmd[0]} (pid={process.pid}). Reading stream...", flush=True)
                 
                 # Send initial heartbeat to client
                 yield "data: [SERVER] Initializing AI...\n\n"
@@ -944,6 +984,30 @@ INSTRUCTIONS:
                             yield format_sse(cleaned)
                         continue
                     
+                    # Check Claude / Copilot stream event structures
+                    if event.get('type') == 'assistant':
+                        msg = event.get('message', {})
+                        for content_item in msg.get('content', []):
+                            if content_item.get('type') == 'text' and content_item.get('text'):
+                                text_sent = True
+                                yield format_sse(content_item['text'])
+                        continue
+                    elif event.get('type') == 'content_block_delta':
+                        delta = event.get('delta', {})
+                        if delta.get('text'):
+                            text_sent = True
+                            yield format_sse(delta['text'])
+                        continue
+                    elif event.get('type') == 'result' and isinstance(event.get('result'), str):
+                        res_val = event.get('result', '')
+                        if event.get('is_error') or event.get('api_error_status') == 429:
+                            yield f"data: [ERROR] {res_val}\n\n"
+                        elif res_val and not text_sent:
+                            text_sent = True
+                            yield format_sse(str(res_val))
+                        yield "data: [DONE]\n\n"
+                        break
+
                     event_type = event.get('event', '')
                     if event_type == 'init':
                         conv_id = event.get('conversation_id')
@@ -1038,7 +1102,7 @@ INSTRUCTIONS:
             
             # Run with timeout to detect hanging
             result = subprocess.run(
-                ['agy', '-p', prompt, '--output-format', 'json', *AGY_FLAGS, *extra_args],
+                cli_cmd,
                 capture_output=True,
                 text=True,
                 check=False,
@@ -1059,10 +1123,11 @@ INSTRUCTIONS:
                     next_acc = account_pool.mark_quota_exhausted(acc_id, result.stderr)
                     if next_acc and next_acc.get('home_dir'):
                         print(f"[QUOTA] Retrying immediately with account: '{next_acc['id']}'...", flush=True)
+                        ensure_account_symlinks(next_acc['home_dir'])
                         retry_env = env.copy()
                         retry_env['HOME'] = next_acc['home_dir']
                         result = subprocess.run(
-                            ['agy', '-p', prompt, '--output-format', 'json', *AGY_FLAGS, *extra_args],
+                            cli_cmd,
                             capture_output=True,
                             text=True,
                             check=False,
