@@ -1,30 +1,49 @@
 # AI Gateway API
 
-A RESTful API gateway built on Flask that interfaces Google's `agy` CLI engine. It handles file ingestion (text, PDFs, images), session-isolated execution environments, and streaming responses via Server-Sent Events (SSE).
+A RESTful API gateway built on Flask that interfaces modern AI developer CLI engines (`agy`, `claude`, `copilot`). It handles file ingestion (text, PDFs, images), session-isolated execution environments, token security, and streaming responses via Server-Sent Events (SSE).
 
 ---
 
 ## Features
 
+* **Multi-Backend CLI Routing:** Dynamically executes prompts across Google Antigravity (`agy`), Anthropic Claude Code (`claude`), or GitHub Copilot (`copilot`).
 * **Multimodal File Ingestion:** Supports text files, PDFs (automatic text extraction), and raw images (PNG, JPG, WebP, GIF) for visual reasoning and OCR.
 * **Per-Session File Isolation:** Uploads are partitioned into isolated session sandboxes (`~/.gemini_uploads/<session_id>/`) preventing cross-user file collisions or overwrites.
 * **Process Teardown & Streaming (SSE):** Streaming responses over `text/event-stream` with automatic process termination when clients disconnect or abort.
 * **Non-Streaming Mode:** Direct JSON responses for synchronous backend integration.
-* **CLI Engine:** Powered by Google's `agy` CLI in headless, read-only mode.
+* **Bearer Token Security:** Token authorization on all API routes protecting endpoints from unauthorized callers.
 
 ---
 
 ## Environment & Configuration
 
-Configurable via environment variables (see `config.py`):
+Configurable via `.env` or system environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `PORT` | `5055` | Server listening port |
+| `PORT` | `5000` | Server listening port |
 | `HOST` | `0.0.0.0` | Bind address |
+| `DEFAULT_BACKEND` | `agy` | Default engine: `agy`, `claude`, or `copilot` |
+| `GATEWAY_TOKENS` | *(empty)* | Comma-separated bearer tokens for API protection |
+| `CORS_ORIGINS` | `*` | Allowed CORS origins for browser clients |
 | `UPLOAD_DIR` | `~/.gemini_uploads` | Root directory for session storage |
+| `UPLOAD_TTL_SECONDS` | `21600` (6h) | Auto-cleanup lifetime for session files |
 | `MAX_FILE_SIZE` | `52428800` (50MB) | Maximum file size in bytes |
 | `GEMINI_TIMEOUT` | `300` (5 min) | Subprocess timeout limit |
+
+---
+
+## Authentication
+
+When `GATEWAY_TOKENS` is configured in `.env`, all `/api/*` endpoints (except health check `/api/auth/status`) require a valid bearer token via headers:
+
+```http
+Authorization: Bearer <your-gateway-token>
+```
+or
+```http
+X-Gateway-Token: <your-gateway-token>
+```
 
 ---
 
@@ -36,6 +55,7 @@ Configurable via environment variables (see `config.py`):
 Upload a file (text, PDF, or image) to the caller's session sandbox.
 
 #### Headers
+* `Authorization: Bearer <token>` *(if enabled)*
 * `X-Session-ID` *(optional)*: Session identifier string. Defaults to `'default'`.
 
 #### Request Body
@@ -75,6 +95,7 @@ Submit a prompt and optional file references to generate an answer.
 
 #### Headers
 * `Content-Type: application/json`
+* `Authorization: Bearer <token>` *(if enabled)*
 * `X-Session-ID` *(optional)*: Session identifier string.
 
 #### Request Body
@@ -82,12 +103,13 @@ Submit a prompt and optional file references to generate an answer.
 {
   "prompt": "What does this image show?",
   "files": ["chart_a1b2c3d4.png"],
+  "backend": "agy",
   "stream": false,
   "session_id": "session_123"
 }
 ```
 
-Or multi-turn conversation format:
+Or multi-turn conversation format with structured output:
 ```json
 {
   "messages": [
@@ -96,7 +118,9 @@ Or multi-turn conversation format:
     {"role": "user", "content": "What was the Q3 revenue?"}
   ],
   "files": ["revenue_a1b2c3d4.csv"],
+  "backend": "claude",
   "stream": true,
+  "effort": "high",
   "session_id": "session_123"
 }
 ```
@@ -106,8 +130,11 @@ Or multi-turn conversation format:
 |---|---|---|---|
 | `prompt` | string | Either `prompt` or `messages` | Direct query text |
 | `messages` | array | Either `prompt` or `messages` | Multi-turn chat history array |
+| `backend` | string | No (default `agy`) | Execution engine: `"agy"`, `"claude"`, `"copilot"` |
 | `files` | array | No | List of uploaded filenames (strings or `{filename: ...}` objects) |
 | `stream` | boolean | No (default `false`) | `true` for SSE stream, `false` for standard JSON |
+| `effort` | string | No | Reasoning effort level: `"low"`, `"medium"`, `"high"`, `"max"` |
+| `json_schema` | object | No | JSON Schema for enforced structured response |
 | `session_id` | string | No | Explicit session ID if header is omitted |
 
 #### Responses

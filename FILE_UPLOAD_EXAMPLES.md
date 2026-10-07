@@ -8,7 +8,7 @@ This guide details file upload patterns across text, PDFs, and images with sessi
 
 ### A. Multipart Upload (Text, PDF, Image)
 ```bash
-curl -X POST http://localhost:5055/api/upload \
+curl -X POST http://localhost:5000/api/upload \
   -H "X-Session-ID: session_abc" \
   -F "file=@screenshot.png"
 ```
@@ -28,7 +28,7 @@ Response:
 
 ### B. Base64 JSON Upload
 ```bash
-curl -X POST http://localhost:5055/api/upload \
+curl -X POST http://localhost:5000/api/upload \
   -H "Content-Type: application/json" \
   -H "X-Session-ID: session_abc" \
   -d '{
@@ -45,13 +45,13 @@ curl -X POST http://localhost:5055/api/upload \
 ### Example 1: Image & Visual Analysis
 ```bash
 # 1. Upload the image
-UPLOAD=$(curl -s -X POST http://localhost:5055/api/upload \
+UPLOAD=$(curl -s -X POST http://localhost:5000/api/upload \
   -H "X-Session-ID: visual_inspect" \
   -F "file=@ui_mockup.png")
 IMG_NAME=$(echo $UPLOAD | jq -r '.filename')
 
 # 2. Query visual contents
-curl -X POST http://localhost:5055/api/generate \
+curl -X POST http://localhost:5000/api/generate \
   -H "Content-Type: application/json" \
   -H "X-Session-ID: visual_inspect" \
   -d '{
@@ -64,13 +64,13 @@ curl -X POST http://localhost:5055/api/generate \
 ### Example 2: PDF Document Query (Streaming)
 ```bash
 # 1. Upload PDF (plain-text is automatically extracted)
-UPLOAD=$(curl -s -X POST http://localhost:5055/api/upload \
+UPLOAD=$(curl -s -X POST http://localhost:5000/api/upload \
   -H "X-Session-ID: doc_reader" \
   -F "file=@manual.pdf")
 PDF_NAME=$(echo $UPLOAD | jq -r '.filename')
 
 # 2. Query document with real-time SSE stream
-curl -N -X POST http://localhost:5055/api/generate \
+curl -N -X POST http://localhost:5000/api/generate \
   -H "Content-Type: application/json" \
   -H "X-Session-ID: doc_reader" \
   -d '{
@@ -82,7 +82,7 @@ curl -N -X POST http://localhost:5055/api/generate \
 
 ### Example 3: Multiple Files (Comparing Data)
 ```bash
-curl -X POST http://localhost:5055/api/generate \
+curl -X POST http://localhost:5000/api/generate \
   -H "Content-Type: application/json" \
   -H "X-Session-ID: sales_audit" \
   -d '{
@@ -102,7 +102,7 @@ curl -X POST http://localhost:5055/api/generate \
 ```python
 import requests
 
-BASE_URL = "http://localhost:5055"
+BASE_URL = "http://localhost:5000"
 SESSION_ID = "python_client_session"
 
 def analyze_image(image_path: str, question: str):
@@ -139,7 +139,7 @@ if __name__ == "__main__":
 ## 4. JavaScript / Browser Client Example
 
 ```javascript
-const BASE_URL = "http://localhost:5055";
+const BASE_URL = "http://localhost:5000";
 const SESSION_ID = "web_session_" + Date.now();
 
 // 1. Upload File (Image or Document)
