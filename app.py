@@ -31,7 +31,7 @@ app = Flask(__name__)
 # --- Access and safety settings (environment) ---
 # GATEWAY_TOKENS: comma-separated secrets; every /api call except the health check must send one
 #   (Authorization: Bearer <token>, or X-Gateway-Token). Unset = open, with a warning (old behaviour).
-# CORS_ORIGINS: comma-separated websites allowed to call the API from a browser. Unset = none
+# CORS_ORIGINS: comma-separated websites allowed to call the API from a browser. Unset = * (any)
 #   (the gateway's own page and server-to-server callers don't need CORS).
 # UPLOAD_TTL_SECONDS: uploads older than this are deleted (default 6 hours).
 GATEWAY_TOKENS = {t.strip() for t in os.environ.get('GATEWAY_TOKENS', '').split(',') if t.strip()}
@@ -73,20 +73,15 @@ def _handle_cors_preflight():
             resp.headers['Vary'] = 'Origin'
         return resp
 
-    # Allow same-origin browser chat requests (e.g. the built-in web UI)
-    is_same_origin = bool(
-        request.referrer and request.referrer.startswith(request.host_url)
-    )
-
-    # Every API call needs a token, except the health check and same-origin browser chat
+    # Every API call needs a token, except the health check. The web UI asks the user for it.
+    # (?token= exists for <img> tags showing generated images, which can't send headers.)
     if GATEWAY_TOKENS and request.path.startswith('/api/') and request.path != '/api/auth/status':
-        if not is_same_origin:
-            auth = request.headers.get('Authorization', '')
-            token = auth[7:].strip() if auth.lower().startswith('bearer ') else (
-                request.headers.get('X-Gateway-Token', '').strip() or request.args.get('token', '').strip()
-            )
-            if not any(hmac.compare_digest(token, t) for t in GATEWAY_TOKENS):
-                return jsonify({'error': 'Missing or wrong gateway token'}), 401
+        auth = request.headers.get('Authorization', '')
+        token = auth[7:].strip() if auth.lower().startswith('bearer ') else (
+            request.headers.get('X-Gateway-Token', '').strip() or request.args.get('token', '').strip()
+        )
+        if not any(hmac.compare_digest(token, t) for t in GATEWAY_TOKENS):
+            return jsonify({'error': 'Missing or wrong gateway token'}), 401
 
 # Root directory for uploaded files
 UPLOAD_DIR = os.path.join(os.path.expanduser('~'), '.gemini_uploads')
@@ -719,8 +714,7 @@ def list_artifacts(session_id):
 
 @app.route('/')
 def home():
-    default_token = next(iter(GATEWAY_TOKENS), '') if GATEWAY_TOKENS else ''
-    return render_template('index.html', gateway_token=default_token)
+    return render_template('index.html')
 
 
 @app.route('/api/upload', methods=['POST'])

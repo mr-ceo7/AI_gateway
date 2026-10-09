@@ -37,6 +37,9 @@ _load_env_file()
 PROD_HOST = os.getenv("PROD_HOST", "")
 PROD_USER = os.getenv("PROD_USER", "root")
 PROD_PASS = os.getenv("PROD_PASS", "")
+# token for the production gateway's API (defaults to the first local GATEWAY_TOKENS entry)
+PROD_GATEWAY_TOKEN = os.getenv("PROD_GATEWAY_TOKEN") or next(
+    (t.strip() for t in os.getenv("GATEWAY_TOKENS", "").split(",") if t.strip()), "")
 
 def get_remote_commands():
     if not PROD_HOST:
@@ -285,7 +288,7 @@ def cmd_sync_to_prod(args):
         "rm -f /tmp/accounts_pool.tar.gz && "
         "systemctl restart ai-gateway.service && "
         "sleep 2 && "
-        "curl -s -H 'Referer: http://127.0.0.1:5055/' http://127.0.0.1:5055/api/accounts"
+        f"curl -s -H 'Authorization: Bearer {PROD_GATEWAY_TOKEN}' http://127.0.0.1:5055/api/accounts"
     )
     res = subprocess.run(f'{prod_ssh} "{remote_cmd}"', shell=True, capture_output=True, text=True)
     os.remove(tar_path)

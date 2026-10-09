@@ -718,18 +718,22 @@
     </div>
 
     <script>
-        const EMBEDDED_GATEWAY_TOKEN = "{{ gateway_token or '' }}";
-        if (EMBEDDED_GATEWAY_TOKEN) {
-            localStorage.setItem('gateway_token', EMBEDDED_GATEWAY_TOKEN);
-        }
-
-        // API fetch wrapper with automatic token injection
+        // API fetch wrapper: sends the gateway token saved in this browser. When the gateway
+        // answers 401 (token required or wrong), ask for the token once, save it and retry.
         async function gwFetch(url, opts = {}) {
             const withToken = (o) => {
-                const token = localStorage.getItem('gateway_token') || EMBEDDED_GATEWAY_TOKEN || '';
+                const token = localStorage.getItem('gateway_token') || '';
                 return { ...o, headers: { ...(o.headers || {}), ...(token ? { 'Authorization': 'Bearer ' + token } : {}) } };
             };
-            return await fetch(url, withToken(opts));
+            let res = await fetch(url, withToken(opts));
+            if (res.status === 401) {
+                const entered = window.prompt('This gateway needs an access token (GATEWAY_TOKENS in its .env):');
+                if (entered && entered.trim()) {
+                    localStorage.setItem('gateway_token', entered.trim());
+                    res = await fetch(url, withToken(opts));
+                }
+            }
+            return res;
         }
 
         // --- UI Interactions ---
@@ -766,7 +770,7 @@
         };
 
         customRenderer.image = function (href, title, text) {
-            const token = localStorage.getItem('gateway_token') || EMBEDDED_GATEWAY_TOKEN || '';
+            const token = localStorage.getItem('gateway_token') || '';
             let finalHref = href;
             if (token && href && href.startsWith('/api/artifacts/')) {
                 const sep = href.includes('?') ? '&' : '?';
