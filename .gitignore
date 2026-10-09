@@ -52,6 +52,7 @@ improvements_screenshot.png
 puppeteer_test_screenshot.png
 test_screenshots/
 *.png
+!docs/*.png
 
 # IDE & OS Metadata
 .DS_Store

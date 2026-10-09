@@ -5,6 +5,8 @@ import datetime
 import threading
 import re
 import fcntl
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 
@@ -145,7 +147,7 @@ class AccountPool:
                     return None
 
                 now = time.time()
-                cooldown_period = data.get('cooldown_seconds', self.cooldown_seconds)
+                cooldown_period = parse_reset_duration(error_msg, data.get('cooldown_seconds', self.cooldown_seconds))
                 cooldown_until = now + cooldown_period
 
                 target_idx = None
@@ -251,6 +253,39 @@ class AccountPool:
                 self._save_data(data)
                 return record
 
+    def get_accounts_with_quotas(self, force_refresh: bool = False) -> dict:
+        """Returns all accounts enriched with live/cached 5-hour and weekly quota percentage usage."""
+        global _quota_cache
+        now = time.time()
+        if not force_refresh and _quota_cache["data"] and (now - _quota_cache["timestamp"] < 60):
+            return {
+                **_quota_cache["data"],
+                "cached": True,
+                "cache_age_seconds": round(now - _quota_cache["timestamp"])
+            }
+
+        accounts = self.list_accounts()
+        active = self.get_active_account()
+        active_id = active.get("id") if active else None
+
+        with ThreadPoolExecutor(max_workers=max(1, len(accounts))) as executor:
+            enriched = list(executor.map(fetch_single_account_quota, accounts))
+
+        for acc in enriched:
+            acc["is_active"] = (acc.get("id") == active_id)
+
+        result = {
+            "total": len(enriched),
+            "active_account": active_id,
+            "accounts": enriched,
+            "timestamp": now,
+            "cached": False,
+            "cache_age_seconds": 0
+        }
+        _quota_cache["data"] = result
+        _quota_cache["timestamp"] = now
+        return result
+
     def remove_account(self, account_id: str) -> bool:
         with self.lock:
             with self._file_lock():
@@ -265,6 +300,42 @@ class AccountPool:
                 self._save_data(data)
                 return True
 
+def parse_reset_duration(text: str, default_seconds: int = 1800, max_seconds: int = 1800) -> int:
+    """Extracts duration in seconds from quota error messages like 'Resets in 45h31m14s' or 'try again in 30s'.
+    Capped at max_seconds (default 30 mins) because long reset times (e.g. 45 hours) indicate
+    account billing/subscription renewal cycles rather than sliding rate-limit windows.
+    """
+    if not text:
+        return min(default_seconds, max_seconds)
+    m = re.search(r"(?:resets?|retry|try again|wait)\s+(?:in|after)?\s*([0-9\s\w]+?)(?:\.|\$|\n)", text, re.I)
+    candidate = m.group(1) if m else text
+    total_seconds = 0
+    found = False
+    days = re.search(r"(\d+)\s*d(?:ays?)?", candidate, re.I)
+    if days:
+        total_seconds += int(days.group(1)) * 86400
+        found = True
+    hours = re.search(r"(\d+)\s*h(?:(?:ou)?rs?)?", candidate, re.I)
+    if hours:
+        total_seconds += int(hours.group(1)) * 3600
+        found = True
+    minutes = re.search(r"(\d+)\s*m(?:in(?:ute)?s?)?", candidate, re.I)
+    if minutes:
+        total_seconds += int(minutes.group(1)) * 60
+        found = True
+    seconds = re.search(r"(\d+)\s*s(?:ec(?:ond)?s?)?", candidate, re.I)
+    if seconds:
+        total_seconds += int(seconds.group(1))
+        found = True
+    if not found:
+        sec_num = re.search(r"(\d+)\s*(?:seconds?|secs?)", text, re.I)
+        if sec_num:
+            return min(int(sec_num.group(1)) + 30, max_seconds)
+    if found and total_seconds > 0:
+        return min(total_seconds + 30, max_seconds)
+    return min(default_seconds, max_seconds)
+
+
 def is_quota_error(text: str) -> bool:
     """Detects whether error text indicates quota exhaustion or rate limiting."""
     if not text:
@@ -277,7 +348,10 @@ def is_quota_error(text: str) -> bool:
         r'exhausted.*quota',
         r'too many requests',
         r'resource has been exhausted',
-        r'exceeded your current quota'
+        r'exceeded your current quota',
+        r'quota.*reached',
+        r'individual quota',
+        r'upgrade your subscription'
     ]
     low = text.lower()
     return any(re.search(p, low) for p in patterns)
@@ -331,3 +405,60 @@ def ensure_account_symlinks(account_home: str):
                 os.symlink(src, dst)
             except Exception:
                 pass
+
+
+_quota_cache = {
+    "data": None,
+    "timestamp": 0
+}
+
+
+def parse_usage_text(text: str) -> dict:
+    """Parses standard agy -p /usage output for Gemini Models limits."""
+    res = {
+        "five_hour": {"remaining_pct": 100, "used_pct": 0, "reset_at": None},
+        "weekly": {"remaining_pct": 100, "used_pct": 0, "reset_at": None}
+    }
+    for line in text.splitlines():
+        parts = [p.strip() for p in line.split("\t") if p.strip()]
+        if len(parts) >= 3 and "Gemini Models" in parts[0]:
+            metric = parts[1].lower()
+            val_str = parts[2].replace("%", "").strip()
+            reset_at = parts[3] if len(parts) > 3 else None
+            try:
+                pct = int(val_str)
+                used = max(0, min(100, 100 - pct))
+                if "five hour" in metric:
+                    res["five_hour"] = {"remaining_pct": pct, "used_pct": used, "reset_at": reset_at}
+                elif "weekly" in metric:
+                    res["weekly"] = {"remaining_pct": pct, "used_pct": used, "reset_at": reset_at}
+            except ValueError:
+                pass
+    return res
+
+
+def fetch_single_account_quota(account: dict) -> dict:
+    acc_id = account.get("id")
+    home_dir = account.get("home_dir") or os.path.join(DEFAULT_ACCOUNTS_DIR, "accounts", acc_id or "")
+    env = os.environ.copy()
+    env["HOME"] = home_dir
+    # system locations first (where the server installs agy), then whatever PATH the gateway has
+    env["PATH"] = "/usr/local/bin:/usr/bin:/bin:" + env.get("PATH", "")
+    try:
+        proc = subprocess.run(
+            ["agy", "-p", "/usage"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=8
+        )
+        usage_info = parse_usage_text(proc.stdout)
+    except Exception as e:
+        usage_info = {
+            "five_hour": {"remaining_pct": None, "used_pct": None, "reset_at": None, "error": str(e)},
+            "weekly": {"remaining_pct": None, "used_pct": None, "reset_at": None, "error": str(e)}
+        }
+    return {
+        **account,
+        "quotas": usage_info
+    }

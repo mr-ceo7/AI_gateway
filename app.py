@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, render_template, send_from_directory
 from flask_cors import CORS
 import subprocess
+import datetime
 import os
 import shutil
 import threading
@@ -31,7 +32,7 @@ app = Flask(__name__)
 # --- Access and safety settings (environment) ---
 # GATEWAY_TOKENS: comma-separated secrets; every /api call except the health check must send one
 #   (Authorization: Bearer <token>, or X-Gateway-Token). Unset = open, with a warning (old behaviour).
-# CORS_ORIGINS: comma-separated websites allowed to call the API from a browser. Unset = none
+# CORS_ORIGINS: comma-separated websites allowed to call the API from a browser. Unset = * (any)
 #   (the gateway's own page and server-to-server callers don't need CORS).
 # UPLOAD_TTL_SECONDS: uploads older than this are deleted (default 6 hours).
 GATEWAY_TOKENS = {t.strip() for t in os.environ.get('GATEWAY_TOKENS', '').split(',') if t.strip()}
@@ -45,6 +46,92 @@ if not GATEWAY_TOKENS:
 
 # Account Rotation Pool for multi-account quota failover
 account_pool = AccountPool()
+
+# --- agy model failover ---
+# Requests use PRIMARY_MODEL. When it reports no capacity (503, overloaded, interrupted stream), requests
+# switch to FALLBACK_MODEL for MODEL_COOLDOWN_SECONDS, then go back to the primary.
+PRIMARY_MODEL = os.environ.get('DEFAULT_MODEL', 'gemini-3.8-flash-high')
+FALLBACK_MODEL = os.environ.get('FALLBACK_MODEL', 'gemini-3.7-flash-high')
+MODEL_COOLDOWN_SECONDS = int(os.environ.get('MODEL_COOLDOWN_SECONDS', '300'))  # 5 minutes
+
+_model_lock = threading.Lock()
+_model_state = {
+    'primary_model': PRIMARY_MODEL,
+    'fallback_model': FALLBACK_MODEL,
+    'cooldown_until': 0.0,
+    'last_failover_at': None,
+    'last_error': None,
+    'failover_count': 0,
+    'total_requests_38': 0,
+    'total_requests_37': 0,
+}
+
+def is_model_capacity_error(text: str) -> bool:
+    if not text:
+        return False
+    low = text.lower()
+    patterns = [
+        'no capacity available',
+        'code 503',
+        'unavailable (code 503)',
+        'stream was interrupted',
+        'capacity available for model',
+        'overloaded',
+        'deadline exceeded',
+    ]
+    return any(p in low for p in patterns)
+
+def get_effective_model(requested_model: str = None) -> str:
+    if requested_model:
+        return requested_model
+    now = time.time()
+    with _model_lock:
+        if now < _model_state['cooldown_until']:
+            _model_state['total_requests_37'] += 1
+            return FALLBACK_MODEL
+        _model_state['total_requests_38'] += 1
+        return PRIMARY_MODEL
+
+def record_model_failure(error_msg: str):
+    now = time.time()
+    with _model_lock:
+        _model_state['cooldown_until'] = now + MODEL_COOLDOWN_SECONDS
+        _model_state['last_failover_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        _model_state['last_error'] = str(error_msg)[:300]
+        _model_state['failover_count'] += 1
+    print(f"[MODEL_FAILOVER] Primary model ({PRIMARY_MODEL}) failed: {error_msg}. Cooldown {MODEL_COOLDOWN_SECONDS}s. Active model is now {FALLBACK_MODEL}.", flush=True)
+
+def record_model_success(model_name: str):
+    with _model_lock:
+        if model_name == PRIMARY_MODEL:
+            _model_state['cooldown_until'] = 0.0
+
+def reset_model_cooldown():
+    with _model_lock:
+        _model_state['cooldown_until'] = 0.0
+        _model_state['last_error'] = None
+    print(f"[MODEL_RECOVERY] Manual cooldown reset: active model restored to {PRIMARY_MODEL}.", flush=True)
+
+def get_model_status():
+    now = time.time()
+    with _model_lock:
+        in_failover = now < _model_state['cooldown_until']
+        active_model = FALLBACK_MODEL if in_failover else PRIMARY_MODEL
+        cooldown_remaining = max(0, int(_model_state['cooldown_until'] - now)) if in_failover else 0
+        return {
+            'active_model': active_model,
+            'primary_model': PRIMARY_MODEL,
+            'fallback_model': FALLBACK_MODEL,
+            'in_failover': in_failover,
+            'cooldown_seconds_remaining': cooldown_remaining,
+            'last_failover_at': _model_state['last_failover_at'],
+            'last_error': _model_state['last_error'],
+            'failover_count': _model_state['failover_count'],
+            'stats': {
+                'requests_primary': _model_state['total_requests_38'],
+                'requests_fallback': _model_state['total_requests_37']
+            }
+        }
 
 # Enable CORS for API routes and ensure OPTIONS (preflight) requests are handled.
 # Allow common headers used by clients (e.g. Content-Type, X-Session-ID).
@@ -73,20 +160,15 @@ def _handle_cors_preflight():
             resp.headers['Vary'] = 'Origin'
         return resp
 
-    # Allow same-origin browser chat requests (e.g. the built-in web UI)
-    is_same_origin = bool(
-        request.referrer and request.referrer.startswith(request.host_url)
-    )
-
-    # Every API call needs a token, except the health check and same-origin browser chat
+    # Every API call needs a token, except the health check. The web UI asks the user for it.
+    # (?token= exists for <img> tags showing generated images, which can't send headers.)
     if GATEWAY_TOKENS and request.path.startswith('/api/') and request.path != '/api/auth/status':
-        if not is_same_origin:
-            auth = request.headers.get('Authorization', '')
-            token = auth[7:].strip() if auth.lower().startswith('bearer ') else (
-                request.headers.get('X-Gateway-Token', '').strip() or request.args.get('token', '').strip()
-            )
-            if not any(hmac.compare_digest(token, t) for t in GATEWAY_TOKENS):
-                return jsonify({'error': 'Missing or wrong gateway token'}), 401
+        auth = request.headers.get('Authorization', '')
+        token = auth[7:].strip() if auth.lower().startswith('bearer ') else (
+            request.headers.get('X-Gateway-Token', '').strip() or request.args.get('token', '').strip()
+        )
+        if not any(hmac.compare_digest(token, t) for t in GATEWAY_TOKENS):
+            return jsonify({'error': 'Missing or wrong gateway token'}), 401
 
 # Root directory for uploaded files
 UPLOAD_DIR = os.path.join(os.path.expanduser('~'), '.gemini_uploads')
@@ -719,8 +801,7 @@ def list_artifacts(session_id):
 
 @app.route('/')
 def home():
-    default_token = next(iter(GATEWAY_TOKENS), '') if GATEWAY_TOKENS else ''
-    return render_template('index.html', gateway_token=default_token)
+    return render_template('index.html')
 
 
 @app.route('/api/upload', methods=['POST'])
@@ -807,6 +888,18 @@ def upload_file():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/accounts/quotas', methods=['GET'])
+def get_accounts_quotas():
+    """Return all registered accounts with live 5-hour and weekly quota percentages."""
+    force = request.args.get('refresh', '').lower() in ('1', 'true', 'yes')
+    try:
+        data = account_pool.get_accounts_with_quotas(force_refresh=force)
+        data['model_status'] = get_model_status()
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/accounts', methods=['GET'])
 def list_accounts():
     """Return all registered accounts in the rotation pool and their status."""
@@ -817,6 +910,17 @@ def list_accounts():
         'active_account': active.get('id') if active else None,
         'accounts': accounts
     })
+
+
+@app.route('/api/model/status', methods=['GET'])
+def get_model_status_endpoint():
+    return jsonify(get_model_status())
+
+
+@app.route('/api/model/reset-cooldown', methods=['POST'])
+def reset_model_cooldown_endpoint():
+    reset_model_cooldown()
+    return jsonify(get_model_status())
 
 
 @app.route('/api/generate', methods=['POST'])
@@ -897,6 +1001,8 @@ INSTRUCTIONS:
     if system_prompt:
         prompt = system_prompt + "\nUSER PROMPT:\n" + prompt
 
+    prompt = prompt.encode("utf-8", "ignore").decode("utf-8", "ignore")
+
     stream = data.get('stream', False)
     # Optional: structured output (a JSON schema the final answer must follow) and reasoning effort
     extra_args = []
@@ -926,6 +1032,7 @@ INSTRUCTIONS:
     env.pop('SSH_CLIENT', None)
     env.pop('SSH_TTY', None)
 
+    effective_model = None  # only agy requests choose a model
     if backend in ('claude', 'claude2'):
         claude_bin = 'claude2' if (backend == 'claude2' or shutil.which('claude2')) else 'claude'
         if stream:
@@ -939,6 +1046,9 @@ INSTRUCTIONS:
         if account and account.get('home_dir'):
             env['HOME'] = account['home_dir']
             ensure_account_symlinks(account['home_dir'])
+        # Dynamic model selection with failover/auto-recovery
+        effective_model = get_effective_model(data.get('model'))
+        extra_args += ['--model', effective_model]
         if stream:
             cli_cmd = ['agy', '-p', prompt, '--output-format', 'stream-json', *AGY_FLAGS, *extra_args]
         else:
@@ -1026,11 +1136,15 @@ INSTRUCTIONS:
                         status = result_data.get('status', '')
                         if status != 'SUCCESS':
                             error_msg = result_data.get('error', 'Unknown error')
+                            if effective_model == PRIMARY_MODEL and is_model_capacity_error(error_msg):
+                                record_model_failure(error_msg)
                             if account and is_quota_error(error_msg):
                                 print(f"[QUOTA][STREAM] Account '{acc_id}' exhausted quota: {error_msg}", flush=True)
                                 account_pool.mark_quota_exhausted(acc_id, error_msg)
                             yield f"data: [ERROR] {error_msg}\n\n"
                         else:
+                            if effective_model == PRIMARY_MODEL:
+                                record_model_success(PRIMARY_MODEL)
                             if account:
                                 account_pool.record_success(acc_id)
                             if not text_sent:
@@ -1065,6 +1179,8 @@ INSTRUCTIONS:
                 if lines_received == 0:
                     stderr_output = process.stderr.read() if process.stderr else ''
                     print(f"[STREAM][{session_id}][acc:{acc_id}] No output received. stderr: {stderr_output[:500]}", flush=True)
+                    if effective_model == PRIMARY_MODEL and is_model_capacity_error(stderr_output):
+                        record_model_failure(stderr_output)
                     if account and is_quota_error(stderr_output):
                         print(f"[QUOTA][STREAM] Account '{acc_id}' exhausted quota in stderr.", flush=True)
                         account_pool.mark_quota_exhausted(acc_id, stderr_output)
@@ -1117,6 +1233,35 @@ INSTRUCTIONS:
             
             if result.returncode != 0:
                 print(f"[NON-STREAM] Error output: {result.stderr[:500]}", flush=True)
+                # Check for model capacity/503/interruption error on primary model
+                if effective_model == PRIMARY_MODEL and is_model_capacity_error(result.stderr):
+                    record_model_failure(result.stderr)
+                    print(f"[MODEL_FAILOVER] Capacity limited on {PRIMARY_MODEL}. Retrying immediately with {FALLBACK_MODEL}...", flush=True)
+                    fallback_args = []
+                    skip_next = False
+                    for arg in extra_args:
+                        if skip_next:
+                            skip_next = False
+                            continue
+                        if arg == '--model':
+                            skip_next = True
+                            continue
+                        fallback_args.append(arg)
+                    fallback_args += ['--model', FALLBACK_MODEL]
+                    result = subprocess.run(
+                        ['agy', '-p', prompt, '--output-format', 'json', *AGY_FLAGS, *fallback_args],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        env=env,
+                        cwd=session_dir,
+                        stdin=subprocess.DEVNULL,
+                        timeout=300
+                    )
+                    if result.returncode == 0:
+                        print(f"[MODEL_FAILOVER] Successfully recovered using fallback model {FALLBACK_MODEL}!", flush=True)
+                        effective_model = FALLBACK_MODEL
+
                 # Check for quota exhaustion and perform reactive failover
                 if account and is_quota_error(result.stderr):
                     print(f"[QUOTA] Account '{acc_id}' hit quota limit. Failing over to next account...", flush=True)
