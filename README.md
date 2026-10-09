@@ -14,6 +14,7 @@ An HTTP API and web chat that forward prompts to the AI coding CLIs installed on
 - [API reference](#api-reference)
 - [Files and sessions](#files-and-sessions)
 - [Multiple agy accounts](#multiple-agy-accounts)
+- [Model failover](#model-failover)
 - [Configuration](#configuration)
 - [Security notes](#security-notes)
 - [Limitations](#limitations)
@@ -40,7 +41,8 @@ An HTTP API and web chat that forward prompts to the AI coding CLIs installed on
 - **Files.** Upload text, PDFs or images; the agent reads them. PDFs are converted to text automatically.
 - **Sessions.** Each session gets its own upload folder, so users don't see each other's files.
 - **Generated images.** Images that `agy` creates are copied into the session and linked in the answer.
-- **Quota failover.** Several `agy` Google accounts can share the load; an account that hits its limit rests for an hour.
+- **Quota failover.** Several `agy` Google accounts can share the load. An account that hits its limit rests until its quota resets (at most 30 minutes), and you can see each account's remaining quota.
+- **Model failover.** When the primary Gemini model has no capacity, `agy` requests switch to a fallback model for a few minutes.
 - **Web chat.** A chat page at `/` with history, file attachments and code highlighting, which also works on phones.
 
 ## Install
@@ -128,6 +130,9 @@ If `GATEWAY_TOKENS` is empty, the API is open to anyone who can reach the port, 
 | `GET /api/artifacts/<session>` | List images in a session |
 | `GET /api/artifacts/<session>/<file>` | Download one |
 | `GET /api/accounts` | `agy` account pool status |
+| `GET /api/accounts/quotas` | Pool status plus each account's remaining 5-hour and weekly quota, and the model status. `?refresh=1` skips the 60-second cache |
+| `GET /api/model/status` | Which model `agy` requests use now, and failover history |
+| `POST /api/model/reset-cooldown` | Go back to the primary model immediately |
 | `GET /api/auth/status` | Health check and `agy` login state. No token needed |
 | `GET /api/auth/url` | The Google sign-in link while an `agy` login is waiting (404 otherwise) |
 | `POST /api/auth/submit` | `{"code": "…"}` — finish that login |
@@ -151,6 +156,7 @@ curl -s http://localhost:5000/api/generate \
 | `files` | array | Names returned by `/api/upload` in this session, as strings or `{"filename": …}`. Unknown names are skipped |
 | `backend` | string | `agy` (default, or `DEFAULT_BACKEND`), `claude`, `claude2`, `copilot`. `claude` runs the `claude2` command instead when one is installed |
 | `stream` | bool | `true` for Server-Sent Events, default `false` |
+| `model` | string | Model for this request, instead of the automatic primary/fallback choice. **agy only** |
 | `effort` | string | `low`, `medium`, `high`, `max`. **agy only** |
 | `json_schema` | object | JSON Schema the final answer must follow. Turns streaming off. **agy only** |
 | `session_id` | string | Session, if you don't send the `X-Session-ID` header. Default `default` |
@@ -210,7 +216,9 @@ Multipart form with a `file` field (plus optional `session_id` and `context_mode
 
 ## Multiple agy accounts
 
-For `agy` requests, the gateway picks an account from a pool in `~/.gemini_accounts` (or `AGY_ACCOUNTS_DIR`). If the pool is empty, `agy` runs with your normal login. When a request fails with a quota error (`429`, `RESOURCE_EXHAUSTED`, "quota exceeded", "rate limit"…), that account rests for 60 minutes and the pool moves to the next one:
+For `agy` requests, the gateway picks an account from a pool in `~/.gemini_accounts` (or `AGY_ACCOUNTS_DIR`). If the pool is empty, `agy` runs with your normal login. When a request fails with a quota error (`429`, `RESOURCE_EXHAUSTED`, "quota exceeded", "quota reached", "individual quota", "upgrade your subscription", "rate limit"…), that account rests and the pool moves to the next one.
+
+The rest period comes from the error itself ("resets in 12m" gives 12 minutes and 30 seconds). It is capped at 30 minutes, and is 30 minutes when the error doesn't say. A long reset time, such as "45 hours", usually means a billing cycle, so it gets the 30-minute cap too.
 
 - **Without streaming,** the request is retried once, straight away, on the next account.
 - **With streaming,** the client gets the `[ERROR]`, and the next request uses the next account.
@@ -227,9 +235,40 @@ python manage_accounts.py remove backup
 python manage_accounts.py sync-to-prod          # see below
 ```
 
+`GET /api/accounts/quotas` shows how much quota each account has left. It runs `agy -p /usage` with every account, in parallel, and caches the result for 60 seconds:
+
+```json
+{"total": 1, "active_account": "acct1", "cached": false, "cache_age_seconds": 0,
+ "accounts": [{"id": "acct1", "is_active": true, "...": "...",
+               "quotas": {"five_hour": {"remaining_pct": 73, "used_pct": 27, "reset_at": "resets in 2h"},
+                          "weekly":    {"remaining_pct": 40, "used_pct": 60, "reset_at": "resets Mon"}}}],
+ "model_status": {"active_model": "gemini-3.8-flash-high", "...": "..."}}
+```
+
 The pool format is the same one [agy-pool](https://github.com/mr-ceo7/agy-pool) uses, so accounts added with either tool work in both.
 
 `sync-to-prod` copies the gateway code to `/var/www/ai-gateway` on `PROD_HOST`, and the account pool to `/root/.gemini_accounts`. It then restarts `ai-gateway.service` there and prints `/api/accounts` from it. It uses `PROD_HOST`, `PROD_USER` and `PROD_PASS` (via `sshpass`, or your SSH key if `PROD_PASS` is empty), and `PROD_GATEWAY_TOKEN` for the API call. It connects with host-key checking turned off.
+
+## Model failover
+
+`agy` requests run with `--model`. Normally that's `DEFAULT_MODEL`. When the model reports no capacity, the gateway switches to `FALLBACK_MODEL` for `MODEL_COOLDOWN_SECONDS` (default 5 minutes). The errors that count are a 503, "no capacity available", "overloaded", "deadline exceeded" and "stream was interrupted". After the cooldown it tries the primary model again, and any success on the primary clears the cooldown.
+
+- **Without streaming,** the failed request is retried at once on the fallback model.
+- **With streaming,** the client gets the `[ERROR]` and the following requests use the fallback.
+- **A request that sets `model`** always uses that model, and doesn't affect the failover state.
+
+```bash
+curl -s localhost:5000/api/model/status -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{"active_model": "gemini-3.7-flash-high", "primary_model": "gemini-3.8-flash-high",
+ "fallback_model": "gemini-3.7-flash-high", "in_failover": true, "cooldown_seconds_remaining": 214,
+ "last_failover_at": "2026-10-09T15:41:48+00:00", "last_error": "API error (attempt 2): UNAVAILABLE (code 503): …",
+ "failover_count": 1, "stats": {"requests_primary": 2, "requests_fallback": 1}}
+```
+
+`POST /api/model/reset-cooldown` switches back to the primary model straight away. The counters are kept in memory per gunicorn worker, so with several workers each one tracks its own failover state.
 
 ## Configuration
 
@@ -243,6 +282,9 @@ Set these in `.env` (or the environment) and restart the gateway.
 | `UPLOAD_TTL_SECONDS` | `21600` | Age at which uploaded files are deleted |
 | `PORT` | `5000` | Port for `ai-gateway` / `start.sh`. `python app.py` defaults to 5055. The systemd service is fixed to 5000; edit `ExecStart` in its unit file to change it |
 | `HOST` | `0.0.0.0` | Bind address for `ai-gateway` / `start.sh` |
+| `DEFAULT_MODEL` | `gemini-3.8-flash-high` | Model `agy` requests use normally |
+| `FALLBACK_MODEL` | `gemini-3.7-flash-high` | Model used while the primary has no capacity |
+| `MODEL_COOLDOWN_SECONDS` | `300` | How long to stay on the fallback model |
 | `AGY_ACCOUNTS_DIR` | `~/.gemini_accounts` | Location of the account pool |
 | `PROD_HOST`, `PROD_USER`, `PROD_PASS`, `PROD_GATEWAY_TOKEN` | | Only for `sync-to-prod` |
 
@@ -260,7 +302,7 @@ Set these in `.env` (or the environment) and restart the gateway.
 
 - **One request at a time.** The service runs gunicorn with one synchronous worker and no timeout, so a long or streaming request holds up the next one. `gevent` is installed, but it isn't enabled or tested.
 - **No conversation memory.** Each request starts a fresh CLI. Multi-turn chat works by resending the history in `messages`.
-- **`effort` and `json_schema`** only reach `agy`.
+- **`model`, `effort` and `json_schema`** only reach `agy`.
 - **The Dockerfile is out of date.** It installs `@google/gemini-cli`, not `agy`, and `start.sh` still warns about `GEMINI_API_KEY`. Neither is needed for the systemd setup.
 
 ## Troubleshooting
