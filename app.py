@@ -15,6 +15,7 @@ import hmac
 import json
 from werkzeug.utils import secure_filename
 from utils.account_pool import AccountPool, is_quota_error, ensure_account_symlinks
+from utils.prompt_cache import prompt_cache
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -895,6 +896,7 @@ def get_accounts_quotas():
     try:
         data = account_pool.get_accounts_with_quotas(force_refresh=force)
         data['model_status'] = get_model_status()
+        data['cache_stats'] = prompt_cache.stats()
         return jsonify(data)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -911,6 +913,23 @@ def list_accounts():
         'accounts': accounts
     })
 
+
+
+@app.route('/api/cache/stats', methods=['GET'])
+def get_cache_stats_endpoint():
+    """Return live prompt/response cache statistics."""
+    return jsonify(prompt_cache.stats())
+
+@app.route('/api/cache/clear', methods=['POST'])
+def clear_cache_endpoint():
+    """Admin endpoint to clear response cache."""
+    try:
+        import sqlite3
+        with sqlite3.connect(prompt_cache.db_path, timeout=5) as conn:
+            conn.execute("DELETE FROM response_cache")
+        return jsonify({"status": "cleared", "stats": prompt_cache.stats()})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/model/status', methods=['GET'])
 def get_model_status_endpoint():
