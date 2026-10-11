@@ -426,42 +426,62 @@ _quota_cache = {
 
 
 def parse_usage_text(text: str) -> dict:
-    """Parses standard agy -p /usage output for Gemini Models limits."""
-    res = {
-        "five_hour": None,
-        "weekly": None
-    }
+    """Parses standard agy -p /usage output for both Gemini Models and Claude/GPT models limits."""
+    gemini = {"five_hour": None, "weekly": None}
+    claude = {"five_hour": None, "weekly": None}
+
     for line in text.splitlines():
         parts = [p.strip() for p in line.split("\t") if p.strip()]
-        if len(parts) >= 3 and "Gemini Models" in parts[0]:
-            metric = parts[1].lower()
-            val_str = parts[2].replace("%", "").strip()
-            reset_at = parts[3] if len(parts) > 3 else None
-            try:
-                pct = int(val_str)
-                used = max(0, min(100, 100 - pct))
-                if "five hour" in metric:
-                    res["five_hour"] = {"remaining_pct": pct, "used_pct": used, "reset_at": reset_at}
-                elif "weekly" in metric:
-                    res["weekly"] = {"remaining_pct": pct, "used_pct": used, "reset_at": reset_at}
-            except ValueError:
-                if "disabled" in val_str.lower():
+        if len(parts) >= 3:
+            target = None
+            if "Gemini Models" in parts[0]:
+                target = gemini
+            elif "Claude and GPT" in parts[0]:
+                target = claude
+
+            if target is not None:
+                metric = parts[1].lower()
+                val_str = parts[2].replace("%", "").strip()
+                reset_at = parts[3] if len(parts) > 3 else None
+                try:
+                    pct = int(val_str)
+                    used = max(0, min(100, 100 - pct))
                     if "five hour" in metric:
-                        res["five_hour"] = {"remaining_pct": 0, "used_pct": 100, "reset_at": reset_at}
+                        target["five_hour"] = {"remaining_pct": pct, "used_pct": used, "reset_at": reset_at}
                     elif "weekly" in metric:
-                        res["weekly"] = {"remaining_pct": 0, "used_pct": 100, "reset_at": reset_at}
+                        target["weekly"] = {"remaining_pct": pct, "used_pct": used, "reset_at": reset_at}
+                except ValueError:
+                    if "disabled" in val_str.lower():
+                        if "five hour" in metric:
+                            target["five_hour"] = {"remaining_pct": 0, "used_pct": 100, "reset_at": reset_at}
+                        elif "weekly" in metric:
+                            target["weekly"] = {"remaining_pct": 0, "used_pct": 100, "reset_at": reset_at}
 
-    # If weekly is present and at 0%, and no 5-hour limit was reported, 5-hour is also exhausted (0%)
-    if res["weekly"] and res["weekly"]["remaining_pct"] == 0 and res["five_hour"] is None:
-        res["five_hour"] = {"remaining_pct": 0, "used_pct": 100, "reset_at": res["weekly"]["reset_at"]}
+    # If weekly is present and at 0%, and no 5-hour limit was reported, 5-hour is also 0%
+    for target in (gemini, claude):
+        if target["weekly"] and target["weekly"]["remaining_pct"] == 0 and target["five_hour"] is None:
+            target["five_hour"] = {"remaining_pct": 0, "used_pct": 100, "reset_at": target["weekly"]["reset_at"]}
 
-    # Default unparsed metrics gracefully
-    if res["five_hour"] is None:
-        res["five_hour"] = {"remaining_pct": 100, "used_pct": 0, "reset_at": None}
-    if res["weekly"] is None:
-        res["weekly"] = {"remaining_pct": 100, "used_pct": 0, "reset_at": None}
+    # If Claude has active quota while Gemini is exhausted (0%) or missing, prioritize Claude quotas
+    claude_has_quota = claude["weekly"] and (claude["weekly"].get("remaining_pct") or 0) > 0
+    gemini_exhausted = (gemini["weekly"] and gemini["weekly"].get("remaining_pct") == 0) or (gemini["weekly"] is None)
 
-    return res
+    if claude_has_quota and gemini_exhausted:
+        active_quotas = claude
+    else:
+        active_quotas = gemini
+
+    if active_quotas["five_hour"] is None:
+        active_quotas["five_hour"] = {"remaining_pct": 100, "used_pct": 0, "reset_at": None}
+    if active_quotas["weekly"] is None:
+        active_quotas["weekly"] = {"remaining_pct": 100, "used_pct": 0, "reset_at": None}
+
+    return {
+        "five_hour": active_quotas["five_hour"],
+        "weekly": active_quotas["weekly"],
+        "gemini": gemini,
+        "claude": claude,
+    }
 
 
 def fetch_single_account_quota(account: dict) -> dict:

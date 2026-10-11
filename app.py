@@ -1078,6 +1078,8 @@ INSTRUCTIONS:
             ensure_account_symlinks(account['home_dir'])
         # Dynamic model selection with failover/auto-recovery
         effective_model = get_effective_model(data.get('model'))
+        if account and account.get('id') == 'claude2' and not data.get('model'):
+            effective_model = "Claude Sonnet 4.6 (Thinking)"
         extra_args += ['--model', effective_model]
         if stream:
             cli_cmd = ['agy', '-p', prompt, '--output-format', 'stream-json', *AGY_FLAGS, *extra_args]
