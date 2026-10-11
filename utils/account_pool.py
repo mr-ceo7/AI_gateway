@@ -428,8 +428,8 @@ _quota_cache = {
 def parse_usage_text(text: str) -> dict:
     """Parses standard agy -p /usage output for Gemini Models limits."""
     res = {
-        "five_hour": {"remaining_pct": 100, "used_pct": 0, "reset_at": None},
-        "weekly": {"remaining_pct": 100, "used_pct": 0, "reset_at": None}
+        "five_hour": None,
+        "weekly": None
     }
     for line in text.splitlines():
         parts = [p.strip() for p in line.split("\t") if p.strip()]
@@ -445,7 +445,22 @@ def parse_usage_text(text: str) -> dict:
                 elif "weekly" in metric:
                     res["weekly"] = {"remaining_pct": pct, "used_pct": used, "reset_at": reset_at}
             except ValueError:
-                pass
+                if "disabled" in val_str.lower():
+                    if "five hour" in metric:
+                        res["five_hour"] = {"remaining_pct": 0, "used_pct": 100, "reset_at": reset_at}
+                    elif "weekly" in metric:
+                        res["weekly"] = {"remaining_pct": 0, "used_pct": 100, "reset_at": reset_at}
+
+    # If weekly is present and at 0%, and no 5-hour limit was reported, 5-hour is also exhausted (0%)
+    if res["weekly"] and res["weekly"]["remaining_pct"] == 0 and res["five_hour"] is None:
+        res["five_hour"] = {"remaining_pct": 0, "used_pct": 100, "reset_at": res["weekly"]["reset_at"]}
+
+    # Default unparsed metrics gracefully
+    if res["five_hour"] is None:
+        res["five_hour"] = {"remaining_pct": 100, "used_pct": 0, "reset_at": None}
+    if res["weekly"] is None:
+        res["weekly"] = {"remaining_pct": 100, "used_pct": 0, "reset_at": None}
+
     return res
 
 
