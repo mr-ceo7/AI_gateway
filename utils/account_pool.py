@@ -91,6 +91,18 @@ class AccountPool:
                         acc['status'] = 'ready'
                 return data.get('accounts', [])
 
+    def get_account(self, account_id: str) -> Optional[dict]:
+        """
+        Returns a specific account dict by account_id, regardless of active_index.
+        """
+        with self.lock:
+            with self._file_lock():
+                data = self._load_data()
+                for acc in data.get('accounts', []):
+                    if acc.get('id') == account_id:
+                        return acc
+                return None
+
     def get_active_account(self) -> Optional[dict]:
         """
         Returns the current active account dict with its isolated home_dir.

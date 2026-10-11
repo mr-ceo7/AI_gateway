@@ -246,7 +246,10 @@ def cmd_sync_to_prod(args):
     remote_target = f"{PROD_USER}@{PROD_HOST}"
     print(f"\n[SYNC] Synchronizing code and account pool to production server ({remote_target})...")
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    local_accounts_dir = os.path.expanduser("~/.gemini_accounts")
+    local_accounts_dir = os.getenv("AGY_ACCOUNTS_DIR") or (
+        "/home/qassim/.gemini_accounts" if os.path.isdir("/home/qassim/.gemini_accounts")
+        else os.path.expanduser("~/.gemini_accounts")
+    )
     if not os.path.isdir(local_accounts_dir):
         print(f"Error: {local_accounts_dir} does not exist.")
         sys.exit(1)
@@ -263,10 +266,26 @@ def cmd_sync_to_prod(args):
     subprocess.run(f"{prod_scp} {manage_py} {remote_target}:/var/www/ai-gateway/manage_accounts.py", shell=True, check=True)
     subprocess.run(f"{prod_scp} {index_html} {remote_target}:/var/www/ai-gateway/templates/index.html", shell=True, check=True)
 
-    # 2. Tar the accounts directory
+    # 2. Tar the accounts directory excluding caches, browser profiles, binaries, logs, and backups
     tar_path = "/tmp/accounts_pool.tar.gz"
+    accounts_base = os.path.dirname(local_accounts_dir)
+    accounts_rel = os.path.basename(local_accounts_dir)
     subprocess.run(
-        ["tar", "-czf", tar_path, "-C", os.path.expanduser("~"), ".gemini_accounts"],
+        [
+            "tar", "-czf", tar_path,
+            "--exclude=*.tar.gz",
+            "--exclude=backup*",
+            "--exclude=*/.local*",
+            "--exclude=*webm_encoder*",
+            "--exclude=*google-chrome-headless*",
+            "--exclude=*/.cache*",
+            "--exclude=*/.config*",
+            "--exclude=*/.npm*",
+            "--exclude=*/brain*",
+            "--exclude=*/conversations*",
+            "--exclude=*/log*",
+            "-C", accounts_base, accounts_rel
+        ],
         check=True
     )
 
@@ -282,6 +301,7 @@ def cmd_sync_to_prod(args):
     print("Applying remote configuration and restarting ai-gateway.service...")
     remote_cmd = (
         "tar -xzf /tmp/accounts_pool.tar.gz -C /root/ && "
+        "sed -i 's|/home/qassim/.gemini_accounts|/root/.gemini_accounts|g' /root/.gemini_accounts/accounts.json && "
         "chown -R root:root /root/.gemini_accounts && "
         "chmod -R 700 /root/.gemini_accounts && "
         "chown -R root:www-data /var/www/ai-gateway && "

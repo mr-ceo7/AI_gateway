@@ -965,8 +965,19 @@ def generate():
     session_id = request.headers.get('X-Session-ID') or data.get('session_id') or 'default'
     session_dir = get_session_upload_dir(session_id)
 
-    # Determine active account from pool
-    account = account_pool.get_active_account()
+    # Determine active account from pool (supports manual account override via X-Account-ID or account_id)
+    req_account_id = request.headers.get('X-Account-ID') or data.get('account_id') or data.get('account')
+    account = None
+    if req_account_id and str(req_account_id).strip().lower() not in ('auto', 'default', ''):
+        target_acc = str(req_account_id).strip()
+        account = account_pool.get_account(target_acc)
+        if not account:
+            print(f"[ACCOUNT_POOL] Requested account '{target_acc}' not found; falling back to active pool account", flush=True)
+            account = account_pool.get_active_account()
+        else:
+            print(f"[ACCOUNT_POOL] Using explicitly requested account: '{target_acc}'", flush=True)
+    else:
+        account = account_pool.get_active_account()
     acc_id = account.get('id') if account else 'default'
 
     # Handle file references with system prompt
