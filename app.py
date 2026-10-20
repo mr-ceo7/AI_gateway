@@ -5,6 +5,7 @@ import datetime
 import os
 import shutil
 import threading
+import queue
 import time
 import re
 import pty
@@ -1109,11 +1110,56 @@ INSTRUCTIONS:
                 yield "data: [SERVER] Initializing AI...\n\n"
                 
                 turn_start_time = time.time()
+                last_line_time = time.time()
                 conv_id = None
                 lines_received = 0
                 text_sent = False
-                for line in process.stdout:
-                    line = line.strip()
+                stream_timed_out = False
+
+                line_queue = queue.Queue()
+                def _stream_reader(pipe, q):
+                    try:
+                        for raw_line in iter(pipe.readline, ''):
+                            q.put(raw_line)
+                    except Exception:
+                        pass
+                    finally:
+                        q.put(None)
+
+                reader_thread = threading.Thread(
+                    target=_stream_reader,
+                    args=(process.stdout, line_queue),
+                    daemon=True
+                )
+                reader_thread.start()
+
+                STREAM_IDLE_TIMEOUT = 180  # 3 minutes with zero output
+                STREAM_MAX_DURATION = 600  # 10 minutes total stream limit
+
+                while True:
+                    if time.time() - turn_start_time > STREAM_MAX_DURATION:
+                        print(f"[STREAM][{session_id}][acc:{acc_id}] Max stream duration ({STREAM_MAX_DURATION}s) exceeded. Aborting.", flush=True)
+                        yield f"data: [ERROR] Generation timed out (max duration {STREAM_MAX_DURATION}s reached)\n\n"
+                        stream_timed_out = True
+                        break
+
+                    try:
+                        raw_line = line_queue.get(timeout=2.0)
+                    except queue.Empty:
+                        if process.poll() is not None and line_queue.empty():
+                            break
+                        if time.time() - last_line_time > STREAM_IDLE_TIMEOUT:
+                            print(f"[STREAM][{session_id}][acc:{acc_id}] Stream idle timeout ({STREAM_IDLE_TIMEOUT}s) exceeded. Aborting.", flush=True)
+                            yield f"data: [ERROR] Generation timed out (no output for {STREAM_IDLE_TIMEOUT}s)\n\n"
+                            stream_timed_out = True
+                            break
+                        continue
+
+                    if raw_line is None:
+                        break
+
+                    last_line_time = time.time()
+                    line = raw_line.strip()
                     if not line:
                         continue
                     
@@ -1205,10 +1251,32 @@ INSTRUCTIONS:
                         yield "data: [DONE]\n\n"
                         break
                 
-                process.wait()
+                if stream_timed_out:
+                    if process.poll() is None:
+                        try:
+                            process.terminate()
+                            process.wait(timeout=2)
+                        except Exception:
+                            try:
+                                process.kill()
+                            except Exception:
+                                pass
+                else:
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            process.terminate()
+                            process.wait(timeout=2)
+                        except Exception:
+                            try:
+                                process.kill()
+                            except Exception:
+                                pass
+
                 print(f"[STREAM][{session_id}][acc:{acc_id}] Process finished (exit={process.returncode}, lines={lines_received})", flush=True)
                 
-                if lines_received == 0:
+                if lines_received == 0 and not stream_timed_out:
                     stderr_output = process.stderr.read() if process.stderr else ''
                     print(f"[STREAM][{session_id}][acc:{acc_id}] No output received. stderr: {stderr_output[:500]}", flush=True)
                     if effective_model == PRIMARY_MODEL and is_model_capacity_error(stderr_output):
@@ -1225,17 +1293,28 @@ INSTRUCTIONS:
                 print(f"[STREAM][{session_id}][acc:{acc_id}] Exception during generation: {e}", flush=True)
                 yield f"data: [ERROR] {str(e)}\n\n"
             finally:
-                if process and process.poll() is None:
-                    print(f"[STREAM][{session_id}][acc:{acc_id}] Terminating active agy process (pid={process.pid})...", flush=True)
-                    try:
-                        process.terminate()
-                        process.wait(timeout=2)
-                    except Exception:
+                if process:
+                    if process.poll() is None:
+                        print(f"[STREAM][{session_id}][acc:{acc_id}] Terminating active agy process (pid={process.pid})...", flush=True)
                         try:
-                            process.kill()
+                            process.terminate()
+                            process.wait(timeout=2)
                         except Exception:
-                            pass
-                    print(f"[STREAM][{session_id}][acc:{acc_id}] Child process terminated cleanly.", flush=True)
+                            try:
+                                process.kill()
+                            except Exception:
+                                pass
+                        print(f"[STREAM][{session_id}][acc:{acc_id}] Child process terminated cleanly.", flush=True)
+                    try:
+                        if process.stdout:
+                            process.stdout.close()
+                    except Exception:
+                        pass
+                    try:
+                        if process.stderr:
+                            process.stderr.close()
+                    except Exception:
+                        pass
 
         resp = app.response_class(generate_output(), mimetype='text/event-stream')
         resp.headers['Cache-Control'] = 'no-cache, no-transform'
