@@ -1133,8 +1133,8 @@ INSTRUCTIONS:
                 )
                 reader_thread.start()
 
-                STREAM_IDLE_TIMEOUT = 180  # 3 minutes with zero output
-                STREAM_MAX_DURATION = 600  # 10 minutes total stream limit
+                STREAM_IDLE_TIMEOUT = 360  # 6 minutes with zero output (agy internal stream idle timeout is 5m)
+                STREAM_MAX_DURATION = 900  # 15 minutes total stream limit (matches bank_build client timeout)
 
                 while True:
                     if time.time() - turn_start_time > STREAM_MAX_DURATION:
