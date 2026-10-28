@@ -1,6 +1,6 @@
 # AI Gateway
 
-![AI Gateway banner](docs/banner.svg)
+![AI Gateway banner](docs/banner.jpg)
 
 An HTTP API and web chat that forward prompts to the AI coding CLIs installed on a machine: Google Antigravity (`agy`), Claude Code (`claude`) and GitHub Copilot (`copilot`). Send a prompt, optionally with uploaded files, and get the answer back as JSON or as a live stream. The gateway handles the CLI processes, per-session file folders, PDF text extraction, and switching between several `agy` accounts when one runs out of quota.
 
